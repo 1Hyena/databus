@@ -1,15 +1,12 @@
 // SPDX-License-Identifier: MIT
 #include "../../databus.h"
 #include <cstdlib>
-#include <chrono>
-#include <thread>
+#include <ctime>
 
 static void log(DATABUS::ERROR, const char *line) noexcept;
 static void log(const char *fmt, ...) noexcept;
 
 int main(int argc, char **argv) {
-    std::chrono::milliseconds one_second(1000);
-
     log("%s", "starting the program");
 
     {
