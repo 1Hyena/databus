@@ -106,7 +106,7 @@ class DATABUS final {
     bool init() noexcept;
     bool deinit() noexcept;
 
-    void set_logger(void (*callback)(const char *) noexcept) noexcept;
+    void set_logger(void (*callback)(ERROR, const char *) noexcept) noexcept;
     void set_memcap(size_t bytes) noexcept;
     size_t get_memcap() const noexcept;
     size_t get_memtop() const noexcept;
@@ -119,7 +119,7 @@ class DATABUS final {
     size_t read(void *buf, size_t count) noexcept;
     ERROR write(const void *buf, size_t count) noexcept;
 
-    ERROR   set_payload(size_t bus_id, const char *buf, size_t count) noexcept;
+    ERROR   set_payload(size_t bus_id, const void *data, size_t size) noexcept;
     ERROR   set_payload(size_t bus_id, const char *c_str) noexcept;
     PAYLOAD get_payload(size_t bus_id) const noexcept;
 
@@ -619,8 +619,46 @@ inline bool DATABUS::deinit() noexcept {
     return success;
 }
 
+inline void DATABUS::set_logger(
+    void (*callback)(ERROR, const char *) noexcept
+) noexcept {
+    log_callback = callback;
+}
+
+inline DATABUS::ERROR DATABUS::err(ERROR e) noexcept {
+    return (errored = e);
+}
+
+inline DATABUS::ERROR DATABUS::last_error() noexcept {
+    return errored;
+}
+
+constexpr auto DATABUS::fmt_bytes(size_t b) noexcept {
+    constexpr const size_t one{1};
+    struct format_type{
+        double value;
+        const char *unit;
+    };
+
+    return (
+        (sizeof(b) * BITS_PER_BYTE > 40) && b > (one << 40) ? (
+            format_type{
+                double((long double)(b) / (long double)(one << 40)), "TiB"
+            }
+        ) :
+        (sizeof(b) * BITS_PER_BYTE > 30) && b > (one << 30) ? (
+            format_type{
+                double((long double)(b) / (long double)(one << 30)), "GiB"
+            }
+        ) :
+        (sizeof(b) * BITS_PER_BYTE > 20) && b > (one << 20) ? (
+            format_type{ double(b) / double(one << 20), "MiB" }
+        ) : format_type{ double(b) / double(one << 10), "KiB" }
+    );
+}
+
 inline DATABUS::ERROR DATABUS::set_payload(
-    size_t id, const char *data, size_t size
+    size_t id, const void *data, size_t size
 ) noexcept {
     BUS *bus = find_bus(make_query_by_id(id));
 
