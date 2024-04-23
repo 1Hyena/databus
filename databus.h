@@ -625,6 +625,18 @@ inline void DATABUS::set_logger(
     log_callback = callback;
 }
 
+inline void DATABUS::set_memcap(size_t bytes) noexcept {
+    mempool.cap = bytes;
+}
+
+inline size_t DATABUS::get_memcap() const noexcept {
+    return mempool.cap;
+}
+
+inline size_t DATABUS::get_memtop() const noexcept {
+    return mempool.top;
+}
+
 inline DATABUS::ERROR DATABUS::err(ERROR e) noexcept {
     return (errored = e);
 }
