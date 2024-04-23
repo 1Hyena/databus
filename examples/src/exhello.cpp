@@ -9,7 +9,7 @@ int main(int argc, char **argv) {
 
     databus.set_entry(1, "Hello, World!");
 
-    printf("%s\n", (const char *) databus.get_entry(1).data);
+    printf("%s\n", databus.get_entry(1).c_str);
 
     databus.deinit();
 

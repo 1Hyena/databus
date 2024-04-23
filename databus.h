@@ -63,7 +63,8 @@ class DATABUS final {
     struct ENTRY {
         size_t id;
         size_t size;
-        void *data;
+        const void *data;
+        const char *c_str;
         ERROR error;
         bool valid:1;
     };
@@ -145,6 +146,7 @@ class DATABUS final {
         enum class TYPE : uint8_t {
             NONE = 0,
             UINT8,
+            C_STR,
             UINT64,
             PTR,
             BUS_PTR,
@@ -155,6 +157,7 @@ class DATABUS final {
         struct ENTRY {
             union {
                 uint8_t  as_uint8;
+                char     as_char;
                 uint64_t as_uint64;
                 void    *as_ptr;
                 KEY      as_key;
@@ -228,7 +231,7 @@ class DATABUS final {
     static constexpr KEY make_key(uintptr_t) noexcept;
     static constexpr KEY make_key(EVENT) noexcept;
     static constexpr struct BUS make_bus(
-        size_t id, PIPE pipe =make_pipe(PIPE::TYPE::UINT8)
+        size_t id, PIPE pipe =make_pipe(PIPE::TYPE::C_STR)
     ) noexcept;
 
     static constexpr struct ALERT make_alert(
@@ -250,7 +253,7 @@ class DATABUS final {
     ) noexcept;
 
     static constexpr PIPE make_pipe(
-        const uint8_t *data, size_t size
+        const void *data, size_t size, PIPE::TYPE =PIPE::TYPE::UINT8
     ) noexcept;
 
     static constexpr PIPE make_pipe(PIPE::TYPE) noexcept;
@@ -672,26 +675,30 @@ constexpr auto DATABUS::fmt_bytes(size_t b) noexcept {
 inline DATABUS::ERROR DATABUS::set_entry(
     size_t id, const void *data, size_t size
 ) noexcept {
+    ERROR error = NO_ERROR;
+
     BUS *bus = find_bus(make_query_by_id(id));
 
     if (bus) {
-        const PIPE payload_wrapper{
-            make_pipe(reinterpret_cast<const uint8_t *>(data), size)
+        const PIPE payload_wrapper{make_pipe(data, size, PIPE::TYPE::C_STR)};
+
+        error = copy(payload_wrapper, bus->payload);
+    }
+    else {
+        const BUS copy_from{
+            make_bus(id, make_pipe(data, size, PIPE::TYPE::C_STR))
         };
 
-        return copy(payload_wrapper, bus->payload);
+        error = capture(copy_from);
     }
 
-    const BUS copy_from{
-        make_bus(id, make_pipe(reinterpret_cast<const uint8_t *>(data), size))
-    };
-
-    return capture(copy_from);
+    return error;
 }
 
 inline DATABUS::ERROR DATABUS::set_entry(
     size_t id, const char *data
 ) noexcept {
+    // TODO: make sure C_STR pipes always end with terminating zero
     return set_entry(id, data, std::strlen(data) + 1);
 }
 
@@ -1021,7 +1028,7 @@ inline uint8_t *DATABUS::to_uint8(const PIPE &pipe) const noexcept {
 }
 
 inline char *DATABUS::to_char(const PIPE &pipe) const noexcept {
-    if (pipe.type != PIPE::TYPE::UINT8) die();
+    if (pipe.type != PIPE::TYPE::C_STR) die();
 
     return static_cast<char *>(pipe.data);
 }
@@ -1046,6 +1053,7 @@ inline void **DATABUS::to_ptr(const PIPE &pipe) const noexcept {
             return static_cast<void **>(pipe.data);
         }
         case PIPE::TYPE::UINT8:
+        case PIPE::TYPE::C_STR:
         case PIPE::TYPE::UINT64:
         case PIPE::TYPE::KEY:
         case PIPE::TYPE::NONE: {
@@ -1062,6 +1070,7 @@ inline void *DATABUS::to_ptr(PIPE::ENTRY &entry) const noexcept {
         case PIPE::TYPE::MEMORY_PTR:
         case PIPE::TYPE::BUS_PTR:     return &(entry.as_ptr);
         case PIPE::TYPE::UINT8:       return &(entry.as_uint8);
+        case PIPE::TYPE::C_STR:       return &(entry.as_char);
         case PIPE::TYPE::UINT64:      return &(entry.as_uint64);
         case PIPE::TYPE::KEY:         return &(entry.as_key);
         case PIPE::TYPE::NONE:        break;
@@ -1076,6 +1085,7 @@ inline void *DATABUS::to_ptr(PIPE &pipe, size_t index) const noexcept {
         case PIPE::TYPE::MEMORY_PTR:
         case PIPE::TYPE::BUS_PTR:     return to_ptr(pipe) + index;
         case PIPE::TYPE::UINT8:       return to_uint8(pipe) + index;
+        case PIPE::TYPE::C_STR:       return to_char(pipe) + index;
         case PIPE::TYPE::UINT64:      return to_uint64(pipe) + index;
         case PIPE::TYPE::KEY:         return to_key(pipe) + index;
         case PIPE::TYPE::NONE:        break;
@@ -1588,14 +1598,15 @@ inline void DATABUS::erase(PIPE &pipe, size_t index) const noexcept {
         die();
     }
 
-    if (index + 1 >= pipe.size) {
-        --pipe.size;
-        return;
+    if (index + 1 < pipe.size) {
+        std::memcpy(
+            to_ptr(pipe, index), to_ptr(pipe, pipe.size - 1), size(pipe.type)
+        );
     }
 
-    std::memcpy(
-        to_ptr(pipe, index), to_ptr(pipe, pipe.size - 1), size(pipe.type)
-    );
+    if (pipe.type == PIPE::TYPE::C_STR) {
+        replace(pipe, pipe.size - 1, make_pipe_entry(PIPE::TYPE::C_STR));
+    }
 
     --pipe.size;
 }
@@ -2184,6 +2195,7 @@ constexpr DATABUS::ENTRY DATABUS::make_entry(
         .id    = id,
         .size  = size,
         .data  = data,
+        .c_str = static_cast<const char*>(data),
         .error = error,
         .valid = valid
     };
@@ -2216,7 +2228,7 @@ constexpr struct DATABUS::INDEX::ENTRY DATABUS::make_index_entry(
 }
 
 constexpr DATABUS::PIPE DATABUS::make_pipe(
-    const uint8_t *data, size_t size
+    const void *data, size_t size, PIPE::TYPE type
 ) noexcept {
     return
 #if __cplusplus <= 201703L
@@ -2225,8 +2237,8 @@ constexpr DATABUS::PIPE DATABUS::make_pipe(
     DATABUS::PIPE{
         .capacity = size,
         .size = size,
-        .data = const_cast<uint8_t *>(data),
-        .type = PIPE::TYPE::UINT8,
+        .data = const_cast<void *>(data),
+        .type = type,
         .memory = nullptr
     };
 }
@@ -2356,6 +2368,7 @@ constexpr DATABUS::EVENT DATABUS::next(EVENT event_type) noexcept {
 constexpr size_t DATABUS::size(PIPE::TYPE type) noexcept {
     switch (type) {
         case PIPE::TYPE::UINT8:       return sizeof(uint8_t);
+        case PIPE::TYPE::C_STR:       return sizeof(char);
         case PIPE::TYPE::UINT64:      return sizeof(uint64_t);
         case PIPE::TYPE::PTR:         return sizeof(void *);
         case PIPE::TYPE::BUS_PTR:     return sizeof(BUS *);
@@ -2370,6 +2383,7 @@ constexpr size_t DATABUS::size(PIPE::TYPE type) noexcept {
 constexpr size_t DATABUS::align(PIPE::TYPE type) noexcept {
     switch (type) {
         case PIPE::TYPE::UINT8:       return alignof(uint8_t);
+        case PIPE::TYPE::C_STR:       return alignof(char);
         case PIPE::TYPE::UINT64:      return alignof(uint64_t);
         case PIPE::TYPE::PTR:         return alignof(void *);
         case PIPE::TYPE::BUS_PTR:     return alignof(BUS *);
