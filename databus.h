@@ -85,9 +85,11 @@ class DATABUS final {
         DESERIALIZE = EVENT::DESERIALIZE,
         SERIALIZE   = EVENT::SERIALIZE;
 
+    static constexpr const char *to_string(EVENT) noexcept;
+
     struct ALERT {
-        size_t bus;
-        EVENT event;
+        size_t entry;
+        EVENT  event;
         bool valid:1;
     };
 
@@ -235,7 +237,7 @@ class DATABUS final {
     ) noexcept;
 
     static constexpr struct ALERT make_alert(
-        size_t bus, EVENT type, bool valid =true
+        size_t entry, EVENT type, bool valid =true
     ) noexcept;
 
     static constexpr struct ENTRY make_entry(ERROR) noexcept;
@@ -436,7 +438,7 @@ class DATABUS final {
     size_t bus_count;
 
     struct BITSET {
-        bool alerted:1;
+        bool alerted:1; // TODO: implement this
         bool reindex:1;
     } bitset;
 
@@ -672,6 +674,38 @@ constexpr auto DATABUS::fmt_bytes(size_t b) noexcept {
             format_type{ double(b) / double(one << 20), "MiB" }
         ) : format_type{ double(b) / double(one << 10), "KiB" }
     );
+}
+
+inline DATABUS::ALERT DATABUS::next_alert() noexcept {
+    bitset.alerted = false;
+
+    return make_alert(0, EVENT::NONE, false);
+}
+
+inline DATABUS::ERROR DATABUS::next_error() noexcept {
+    if (mempool.usage > mempool.top) {
+        mempool.top = mempool.usage;
+
+        log(
+            "top memory usage is %.3f %s",
+            fmt_bytes(mempool.top).value, fmt_bytes(mempool.top).unit
+        );
+    }
+
+    if (mempool.oom) {
+        mempool.oom = false;
+        return err(ERROR::OUT_OF_MEMORY);
+    }
+
+    if (bitset.reindex) {
+        ERROR error{ reindex() };
+
+        if (error != ERROR::NONE) {
+            return err(error);
+        }
+    }
+
+    return err(ERROR::NONE);
 }
 
 inline DATABUS::ERROR DATABUS::set_entry(
@@ -2209,14 +2243,14 @@ constexpr DATABUS::MEMPOOL DATABUS::make_mempool() noexcept {
 }
 
 constexpr DATABUS::ALERT DATABUS::make_alert(
-    size_t bus, EVENT event, bool valid
+    size_t entry, EVENT event, bool valid
 ) noexcept {
     return
 #if __cplusplus <= 201703L
     __extension__
 #endif
     ALERT{
-        .bus   = bus,
+        .entry = entry,
         .event = event,
         .valid = valid
     };
@@ -2393,6 +2427,18 @@ constexpr const char *DATABUS::to_string(ERROR error) noexcept {
     }
 
     return "undefined error";
+}
+
+constexpr const char *DATABUS::to_string(EVENT event) noexcept {
+    switch (event) {
+        case EVENT::NONE:          return "no event";
+        case EVENT::SYNCHRONIZE:   return "synchronization";
+        case EVENT::DESERIALIZE:   return "deserialization";
+        case EVENT::SERIALIZE:     return "serialization";
+        case EVENT::MAX_EVENTS:    return "illegal event";
+    }
+
+    return "undefined event";
 }
 
 constexpr DATABUS::EVENT DATABUS::next(EVENT event_type) noexcept {
