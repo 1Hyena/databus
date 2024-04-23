@@ -26,7 +26,7 @@ int main(int argc, char **argv) {
     }
 
     for (size_t i=0; i<10; ++i) {
-        DATABUS::ERROR error = databus.set_payload(i, "");
+        DATABUS::ERROR error = databus.set_entry(i, "");
 
         switch (error) {
             case DATABUS::NO_ERROR: {

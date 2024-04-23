@@ -60,8 +60,8 @@ class DATABUS final {
 
     static constexpr const char *to_string(ERROR) noexcept;
 
-    struct PAYLOAD {
-        size_t bus;
+    struct ENTRY {
+        size_t id;
         size_t size;
         void *data;
         ERROR error;
@@ -119,9 +119,9 @@ class DATABUS final {
     size_t read(void *buf, size_t count) noexcept;
     ERROR write(const void *buf, size_t count) noexcept;
 
-    ERROR   set_payload(size_t bus_id, const void *data, size_t size) noexcept;
-    ERROR   set_payload(size_t bus_id, const char *c_str) noexcept;
-    PAYLOAD get_payload(size_t bus_id) const noexcept;
+    ERROR set_entry(size_t id, const void *data, size_t size) noexcept;
+    ERROR set_entry(size_t id, const char *c_str) noexcept;
+    ENTRY get_entry(size_t id) const noexcept;
 
     static constexpr const size_t BITS_PER_BYTE{
         std::numeric_limits<unsigned char>::digits
@@ -235,8 +235,8 @@ class DATABUS final {
         size_t bus, EVENT type, bool valid =true
     ) noexcept;
 
-    static constexpr struct PAYLOAD make_payload(ERROR) noexcept;
-    static constexpr struct PAYLOAD make_payload(
+    static constexpr struct ENTRY make_entry(ERROR) noexcept;
+    static constexpr struct ENTRY make_entry(
         size_t id, size_t size, void *data,
         ERROR error =ERROR::NONE, bool valid =true
     ) noexcept;
@@ -669,7 +669,7 @@ constexpr auto DATABUS::fmt_bytes(size_t b) noexcept {
     );
 }
 
-inline DATABUS::ERROR DATABUS::set_payload(
+inline DATABUS::ERROR DATABUS::set_entry(
     size_t id, const void *data, size_t size
 ) noexcept {
     BUS *bus = find_bus(make_query_by_id(id));
@@ -689,20 +689,20 @@ inline DATABUS::ERROR DATABUS::set_payload(
     return capture(copy_from);
 }
 
-inline DATABUS::ERROR DATABUS::set_payload(
+inline DATABUS::ERROR DATABUS::set_entry(
     size_t id, const char *data
 ) noexcept {
-    return set_payload(id, data, std::strlen(data) + 1);
+    return set_entry(id, data, std::strlen(data) + 1);
 }
 
-inline DATABUS::PAYLOAD DATABUS::get_payload(size_t id) const noexcept {
+inline DATABUS::ENTRY DATABUS::get_entry(size_t id) const noexcept {
     const BUS *bus = find_bus(make_query_by_id(id));
 
     if (!bus) {
-        return make_payload(ERROR::NONE);
+        return make_entry(ERROR::NONE);
     }
 
-    return make_payload(bus->id, bus->payload.size, bus->payload.data);
+    return make_entry(bus->id, bus->payload.size, bus->payload.data);
 }
 
 inline const DATABUS::RESULT &DATABUS::report(const RESULT &result) noexcept {
@@ -2173,15 +2173,15 @@ constexpr DATABUS::ALERT DATABUS::make_alert(
     };
 }
 
-constexpr DATABUS::PAYLOAD DATABUS::make_payload(
-    size_t bus_id, size_t size, void *data, ERROR error, bool valid
+constexpr DATABUS::ENTRY DATABUS::make_entry(
+    size_t id, size_t size, void *data, ERROR error, bool valid
 ) noexcept {
     return
 #if __cplusplus <= 201703L
     __extension__
 #endif
-    PAYLOAD{
-        .bus   = bus_id,
+    ENTRY{
+        .id    = id,
         .size  = size,
         .data  = data,
         .error = error,
@@ -2189,8 +2189,8 @@ constexpr DATABUS::PAYLOAD DATABUS::make_payload(
     };
 }
 
-constexpr DATABUS::PAYLOAD DATABUS::make_payload(ERROR error) noexcept {
-    return make_payload(0, 0, nullptr, error, false);
+constexpr DATABUS::ENTRY DATABUS::make_entry(ERROR error) noexcept {
+    return make_entry(0, 0, nullptr, error, false);
 }
 
 constexpr struct DATABUS::INDEX::ENTRY DATABUS::make_index_entry(
