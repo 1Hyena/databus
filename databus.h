@@ -321,6 +321,8 @@ class DATABUS final {
     [[nodiscard]] ERROR insert(PIPE&, size_t index, PIPE::ENTRY) noexcept;
     [[nodiscard]] ERROR copy(const PIPE &src, PIPE &dst) noexcept;
     [[nodiscard]] ERROR append(const PIPE &src, PIPE &dst) noexcept;
+    [[nodiscard]] ERROR null_terminate(PIPE &) noexcept;
+    void null_terminate(PIPE &) const noexcept;
     void replace(PIPE&, size_t index, PIPE::ENTRY) const noexcept;
     INDEX &get_index(INDEX::TYPE) noexcept;
 
@@ -698,8 +700,7 @@ inline DATABUS::ERROR DATABUS::set_entry(
 inline DATABUS::ERROR DATABUS::set_entry(
     size_t id, const char *data
 ) noexcept {
-    // TODO: make sure C_STR pipes always end with terminating zero
-    return set_entry(id, data, std::strlen(data) + 1);
+    return set_entry(id, data, std::strlen(data));
 }
 
 inline DATABUS::ENTRY DATABUS::get_entry(size_t id) const noexcept {
@@ -1493,6 +1494,15 @@ inline DATABUS::ERROR DATABUS::insert(
         }
 
         ++pipe.size;
+
+        if (pipe.type == PIPE::TYPE::C_STR) {
+            ERROR error = null_terminate(pipe);
+
+            if (error != ERROR::NONE) {
+                --pipe.size;
+                return error;
+            }
+        }
     }
 
     replace(pipe, index, value);
@@ -1568,11 +1578,12 @@ inline DATABUS::ERROR DATABUS::append(const PIPE &src, PIPE &dst) noexcept {
         die();
     }
 
+    size_t padding{ dst.type == PIPE::TYPE::C_STR ? size_t{1} : size_t{0} };
     size_t old_size = dst.size;
     size_t new_size = old_size + src.size;
 
     if (new_size > dst.capacity) {
-        ERROR error = reserve(dst, new_size);
+        ERROR error = reserve(dst, new_size + padding);
 
         if (error != ERROR::NONE) {
             return error;
@@ -1588,9 +1599,36 @@ inline DATABUS::ERROR DATABUS::append(const PIPE &src, PIPE &dst) noexcept {
     }
     else if (src.data == dst.data) die();
 
+    if (padding && null_terminate(dst) != ERROR::NONE) {
+        die(); // This should never happen because we reserved extra space.
+    }
+
     std::memcpy(to_ptr(dst, old_size), to_ptr(src, 0), count * size(dst.type));
 
     return ERROR::NONE;
+}
+
+inline DATABUS::ERROR DATABUS::null_terminate(PIPE &pipe) noexcept {
+    if (pipe.size >= pipe.capacity) {
+        ERROR error = reserve(pipe, std::max(pipe.size * 2, size_t{1}));
+
+        if (error != ERROR::NONE) {
+            return error;
+        }
+    }
+
+    const_cast<const DATABUS&>(*this).null_terminate(pipe);
+
+    return ERROR::NONE;
+}
+
+inline void DATABUS::null_terminate(PIPE &pipe) const noexcept {
+    if (pipe.size >= pipe.capacity) {
+        die();
+    }
+
+    replace(pipe, pipe.size++, make_pipe_entry(pipe.type));
+    --pipe.size;
 }
 
 inline void DATABUS::erase(PIPE &pipe, size_t index) const noexcept {
@@ -1604,11 +1642,11 @@ inline void DATABUS::erase(PIPE &pipe, size_t index) const noexcept {
         );
     }
 
-    if (pipe.type == PIPE::TYPE::C_STR) {
-        replace(pipe, pipe.size - 1, make_pipe_entry(PIPE::TYPE::C_STR));
-    }
-
     --pipe.size;
+
+    if (pipe.type == PIPE::TYPE::C_STR) {
+        null_terminate(pipe);
+    }
 }
 
 inline DATABUS::PIPE::ENTRY DATABUS::pop_back(PIPE &pipe) const noexcept {
