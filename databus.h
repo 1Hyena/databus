@@ -677,14 +677,20 @@ constexpr auto DATABUS::fmt_bytes(size_t b) noexcept {
 }
 
 inline DATABUS::ALERT DATABUS::next_alert() noexcept {
+    static constexpr const EVENT blockers[]{
+        EVENT::SERIALIZE, EVENT::DESERIALIZE
+    };
+
     bitset.alerted = false;
 
-    BUS *const bus = find_bus(make_query_by_event(EVENT::SERIALIZE));
+    for (EVENT event_type : blockers) {
+        BUS *const bus = find_bus(make_query_by_event(event_type));
 
-    if (bus) {
-        rem_event(*bus, EVENT::SERIALIZE);
+        if (bus) {
+            rem_event(*bus, event_type);
 
-        return make_alert(bus->id, EVENT::SERIALIZE);
+            return make_alert(bus->id, event_type);
+        }
     }
 
     return make_alert(0, EVENT::NONE, false);
@@ -714,7 +720,7 @@ inline DATABUS::ERROR DATABUS::next_error() noexcept {
     }
 
     static constexpr const EVENT blockers[]{
-        EVENT::SERIALIZE
+        EVENT::SERIALIZE, EVENT::DESERIALIZE
     };
 
     for (EVENT event_type : blockers) {
@@ -735,6 +741,18 @@ inline DATABUS::ERROR DATABUS::next_error() noexcept {
     }
 
     bitset.alerted = false;
+
+    BUS *bus;
+
+    while ( (bus = find_bus(make_query_by_event(EVENT::SYNCHRONIZE))) ) {
+        // Here we broadcast all the modified entries to our peers.
+
+        rem_event(*bus, EVENT::SYNCHRONIZE);
+        set_event(*bus, EVENT::DESERIALIZE); // TODO: remove later
+    }
+
+    // Here we accept modified entries from our peers and mark them for
+    // deserialization.
 
     return err(ERROR::NONE);
 }
@@ -763,8 +781,14 @@ inline DATABUS::ERROR DATABUS::set_entry(
         error = capture(copy_from);
 
         if (!error) {
-            set_event(get_bus(make_query_by_id(id)), EVENT::SERIALIZE);
+            bus = &get_bus(make_query_by_id(id));
+
+            set_event(*bus, EVENT::SERIALIZE);
         }
+    }
+
+    if (!error) {
+        set_event(*bus, EVENT::SYNCHRONIZE);
     }
 
     return error;

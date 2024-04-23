@@ -61,5 +61,5 @@ void run(DATABUS &db) {
 }
 
 void handle(DATABUS &db, DATABUS::ALERT &alert) {
-    log("%s", db.to_string(alert.event));
+    log("%lu: %s", alert.entry, db.to_string(alert.event));
 }
