@@ -35,28 +35,24 @@ int main(int argc, char **argv) {
 }
 
 void run(DATABUS &db) {
-    size_t pulse = 0;
+    for (size_t i=0; i<10; ++i) {
+        // Let's populate the database with some entries.
+
+        DATABUS::ERROR error = db.set_entry(i, "");
+
+        if (error != DATABUS::NO_ERROR) {
+            log("failed to set entry %lu (%s)", i, db.to_string(error));
+        }
+    }
 
     while (!db.next_error()) {
         DATABUS::ALERT alert;
-
-        ++pulse;
 
         while ((alert = db.next_alert()).valid) {
             handle(db, alert);
         }
 
-        DATABUS::ERROR error = db.set_entry(pulse, "");
-
-        if (!error) {
-            log("tick");
-            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-            continue;
-        }
-
-        log("failed to set entry (%s)", db.to_string(error));
-
-        break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
     }
 
     if (db.last_error() != DATABUS::NO_ERROR) {

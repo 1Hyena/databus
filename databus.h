@@ -438,7 +438,7 @@ class DATABUS final {
     size_t bus_count;
 
     struct BITSET {
-        bool alerted:1; // TODO: implement this
+        bool alerted:1;
         bool reindex:1;
     } bitset;
 
@@ -679,6 +679,14 @@ constexpr auto DATABUS::fmt_bytes(size_t b) noexcept {
 inline DATABUS::ALERT DATABUS::next_alert() noexcept {
     bitset.alerted = false;
 
+    BUS *const bus = find_bus(make_query_by_event(EVENT::SERIALIZE));
+
+    if (bus) {
+        rem_event(*bus, EVENT::SERIALIZE);
+
+        return make_alert(bus->id, EVENT::SERIALIZE);
+    }
+
     return make_alert(0, EVENT::NONE, false);
 }
 
@@ -705,6 +713,29 @@ inline DATABUS::ERROR DATABUS::next_error() noexcept {
         }
     }
 
+    static constexpr const EVENT blockers[]{
+        EVENT::SERIALIZE
+    };
+
+    for (EVENT event_type : blockers) {
+        if (!find_bus(make_query_by_event(event_type))) {
+            continue;
+        }
+
+        if (!bitset.alerted) {
+            bitset.alerted = true;
+
+            return ERROR::NONE;
+        }
+
+        return report(
+            ERROR::PENDING_ALERT,
+            "%s", "cannot proceed if there are unhandled events"
+        );
+    }
+
+    bitset.alerted = false;
+
     return err(ERROR::NONE);
 }
 
@@ -726,6 +757,8 @@ inline DATABUS::ERROR DATABUS::set_entry(
         };
 
         error = capture(copy_from);
+
+        set_event(get_bus(make_query_by_id(id)), EVENT::SERIALIZE);
     }
 
     return error;
@@ -756,6 +789,14 @@ inline const DATABUS::RESULT &DATABUS::report(const RESULT &result) noexcept {
     }
 
     return result;
+}
+
+inline DATABUS::ERROR DATABUS::report(
+    ERROR error, int line, const char *file, char const *function
+) const noexcept {
+    return report(
+        error, "%s: %s (%s:%d)", function, to_string(error), file, line
+    );
 }
 
 inline DATABUS::ERROR DATABUS::report(
