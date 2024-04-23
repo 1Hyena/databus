@@ -1582,7 +1582,7 @@ inline DATABUS::ERROR DATABUS::append(const PIPE &src, PIPE &dst) noexcept {
     size_t old_size = dst.size;
     size_t new_size = old_size + src.size;
 
-    if (new_size > dst.capacity) {
+    if (new_size + padding > dst.capacity) {
         ERROR error = reserve(dst, new_size + padding);
 
         if (error != ERROR::NONE) {
@@ -1610,7 +1610,7 @@ inline DATABUS::ERROR DATABUS::append(const PIPE &src, PIPE &dst) noexcept {
 
 inline DATABUS::ERROR DATABUS::null_terminate(PIPE &pipe) noexcept {
     if (pipe.size >= pipe.capacity) {
-        ERROR error = reserve(pipe, std::max(pipe.size * 2, size_t{1}));
+        ERROR error = reserve(pipe, pipe.size + 1);
 
         if (error != ERROR::NONE) {
             return error;
