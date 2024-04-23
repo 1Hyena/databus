@@ -742,6 +742,10 @@ inline DATABUS::ERROR DATABUS::next_error() noexcept {
 inline DATABUS::ERROR DATABUS::set_entry(
     size_t id, const void *data, size_t size
 ) noexcept {
+    if (id == 0) {
+        return fuse() ? report_bad_request() : ERROR::BAD_REQUEST;
+    }
+
     ERROR error = NO_ERROR;
 
     BUS *bus = find_bus(make_query_by_id(id));
@@ -758,7 +762,9 @@ inline DATABUS::ERROR DATABUS::set_entry(
 
         error = capture(copy_from);
 
-        set_event(get_bus(make_query_by_id(id)), EVENT::SERIALIZE);
+        if (!error) {
+            set_event(get_bus(make_query_by_id(id)), EVENT::SERIALIZE);
+        }
     }
 
     return error;
@@ -936,6 +942,10 @@ inline DATABUS::ERROR DATABUS::report(
 }
 
 inline DATABUS::ERROR DATABUS::capture(const BUS &copy) noexcept {
+    if (copy.id == 0) {
+        return fuse() ? report_bug() : ERROR::LIBRARY;
+    }
+
     if (find_bus(make_query_by_id(copy.id))) {
         return fuse() ? report_bug() : ERROR::LIBRARY;
     }

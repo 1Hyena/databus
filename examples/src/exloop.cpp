@@ -35,7 +35,7 @@ int main(int argc, char **argv) {
 }
 
 void run(DATABUS &db) {
-    for (size_t i=0; i<10; ++i) {
+    for (size_t i=1; i<=10; ++i) {
         // Let's populate the database with some entries.
 
         DATABUS::ERROR error = db.set_entry(i, "");

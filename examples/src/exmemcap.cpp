@@ -20,7 +20,7 @@ int main(int argc, char **argv) {
         return EXIT_FAILURE;
     }
 
-    for (size_t i=0; i<10; ++i) {
+    for (size_t i=1; i<=10; ++i) {
         DATABUS::ERROR error = databus.set_entry(i, "");
 
         switch (error) {
