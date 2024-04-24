@@ -75,6 +75,7 @@ class DATABUS final {
         SYNCHRONIZE,
         DESERIALIZE,
         SERIALIZE,
+        FINALIZE,
         // Do not change the list below this line.
         MAX_EVENTS
     };
@@ -83,7 +84,8 @@ class DATABUS final {
         NO_EVENT    = EVENT::NONE,
         SYNCHRONIZE = EVENT::SYNCHRONIZE,
         DESERIALIZE = EVENT::DESERIALIZE,
-        SERIALIZE   = EVENT::SERIALIZE;
+        SERIALIZE   = EVENT::SERIALIZE,
+        FINALIZE    = EVENT::FINALIZE;
 
     static constexpr const char *to_string(EVENT) noexcept;
 
@@ -676,26 +678,6 @@ constexpr auto DATABUS::fmt_bytes(size_t b) noexcept {
     );
 }
 
-inline DATABUS::ALERT DATABUS::next_alert() noexcept {
-    static constexpr const EVENT blockers[]{
-        EVENT::SERIALIZE, EVENT::DESERIALIZE
-    };
-
-    bitset.alerted = false;
-
-    for (EVENT event_type : blockers) {
-        BUS *const bus = find_bus(make_query_by_event(event_type));
-
-        if (bus) {
-            rem_event(*bus, event_type);
-
-            return make_alert(bus->id, event_type);
-        }
-    }
-
-    return make_alert(0, EVENT::NONE, false);
-}
-
 inline DATABUS::ERROR DATABUS::next_error() noexcept {
     if (mempool.usage > mempool.top) {
         mempool.top = mempool.usage;
@@ -748,13 +730,45 @@ inline DATABUS::ERROR DATABUS::next_error() noexcept {
         // Here we broadcast all the modified entries to our peers.
 
         rem_event(*bus, EVENT::SYNCHRONIZE);
-        set_event(*bus, EVENT::DESERIALIZE); // TODO: remove later
     }
 
     // Here we accept modified entries from our peers and mark them for
     // deserialization.
 
+    if (find_bus(make_query_by_event(EVENT::DESERIALIZE))) {
+        return err(ERROR::NONE);
+    }
+
+    while ( (bus = find_bus(make_query_by_event(EVENT::FINALIZE))) ) {
+        rem_event(*bus, EVENT::FINALIZE);
+        set_event(*bus, EVENT::SERIALIZE);
+    }
+
     return err(ERROR::NONE);
+}
+
+inline DATABUS::ALERT DATABUS::next_alert() noexcept {
+    static constexpr const EVENT blockers[]{
+        EVENT::SERIALIZE, EVENT::DESERIALIZE
+    };
+
+    bitset.alerted = false;
+
+    for (EVENT event_type : blockers) {
+        BUS *const bus = find_bus(make_query_by_event(event_type));
+
+        if (bus) {
+            rem_event(*bus, event_type);
+
+            if (event_type == EVENT::SERIALIZE) {
+                set_event(*bus, EVENT::FINALIZE);
+            }
+
+            return make_alert(bus->id, event_type);
+        }
+    }
+
+    return make_alert(0, EVENT::NONE, false);
 }
 
 inline DATABUS::ERROR DATABUS::set_entry(
@@ -2510,6 +2524,7 @@ constexpr const char *DATABUS::to_string(EVENT event) noexcept {
         case EVENT::SYNCHRONIZE:   return "synchronization";
         case EVENT::DESERIALIZE:   return "deserialization";
         case EVENT::SERIALIZE:     return "serialization";
+        case EVENT::FINALIZE:      return "finalization";
         case EVENT::MAX_EVENTS:    return "illegal event";
     }
 
