@@ -112,6 +112,9 @@ class DATABUS final {
     bool deinit() noexcept;
 
     void set_logger(void (*callback)(ERROR, const char *) noexcept) noexcept;
+    void set_logger(
+        void (*callback)(ERROR, const char *, void *) noexcept, void *userdata
+    ) noexcept;
     void set_memcap(size_t bytes) noexcept;
     size_t get_memcap() const noexcept;
     size_t get_memtop() const noexcept;
@@ -421,6 +424,8 @@ class DATABUS final {
     ERROR err(ERROR) noexcept;
 
     void (*log_callback)(ERROR, const char *text) noexcept;
+    void (*log_userdata_callback)(ERROR, const char *text, void *) noexcept;
+    void *log_userdata;
     INDEX indices[static_cast<size_t>(INDEX::TYPE::MAX_TYPES)];
 
     struct MEMPOOL {
@@ -460,7 +465,8 @@ inline bool operator!(DATABUS::RESULT result) noexcept {
 }
 
 inline DATABUS::DATABUS() noexcept :
-    log_callback(nullptr), indices{}, mempool{make_mempool()}, handled{},
+    log_callback(nullptr), log_userdata_callback(nullptr),
+    log_userdata(nullptr), indices{}, mempool{make_mempool()}, handled{},
     errored{}, bus_count{}, bitset{}, sigset_all{}, sigset_none{}, fuses{} {
 }
 
@@ -632,6 +638,16 @@ inline void DATABUS::set_logger(
     void (*callback)(ERROR, const char *) noexcept
 ) noexcept {
     log_callback = callback;
+    log_userdata = nullptr;
+    log_userdata_callback = nullptr;
+}
+
+inline void DATABUS::set_logger(
+    void (*callback)(ERROR, const char *, void *) noexcept, void *userdata
+) noexcept {
+    log_callback = nullptr;
+    log_userdata_callback = callback;
+    log_userdata = userdata;
 }
 
 inline void DATABUS::set_memcap(size_t bytes) noexcept {
@@ -932,6 +948,9 @@ inline DATABUS::ERROR DATABUS::report(
             if (log_callback) {
                 log_callback(error, bufptr);
             }
+            else if (log_userdata_callback) {
+                log_userdata_callback(error, bufptr, log_userdata);
+            }
             else {
                 if (::write(STDERR_FILENO, bufptr, strlen(bufptr)) > 0) {
                     ::write(STDERR_FILENO, "\n", 1);
@@ -951,6 +970,9 @@ inline DATABUS::ERROR DATABUS::report(
                 if (log_callback) {
                     log_callback(error, OOM);
                 }
+                else if (log_userdata_callback) {
+                    log_userdata_callback(error, OOM, log_userdata);
+                }
                 else {
                     if (::write(STDERR_FILENO, OOM, strlen(OOM)) > 0) {
                         ::write(STDERR_FILENO, "\n", 1);
@@ -961,6 +983,9 @@ inline DATABUS::ERROR DATABUS::report(
         else {
             if (log_callback) {
                 log_callback(error, bufptr);
+            }
+            else if (log_userdata_callback) {
+                log_userdata_callback(error, bufptr, log_userdata);
             }
             else {
                 if (::write(STDERR_FILENO, bufptr, strlen(bufptr)) > 0) {

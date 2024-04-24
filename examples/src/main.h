@@ -60,7 +60,9 @@ inline void log(const char *fmt, ...) noexcept {
     if (bufptr && bufptr != stackbuf) delete [] bufptr;
 }
 
-inline void log(DATABUS::ERROR error, const char *line) noexcept {
+inline void log(
+    DATABUS::ERROR error, const char *line, const char *prefix ="DB: "
+) noexcept {
     const char *esc = "\x1B[0;31m";
 
     switch (error) {
@@ -69,5 +71,5 @@ inline void log(DATABUS::ERROR error, const char *line) noexcept {
         default: break;
     }
 
-    log("DB: %s%s", esc, line);
+    log("%s%s%s", prefix, esc, line);
 }
