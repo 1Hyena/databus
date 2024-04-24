@@ -8,7 +8,7 @@
 static void handle(DATABUS &, DATABUS::ALERT &, size_t);
 
 int main(int argc, char **argv) {
-    std::array<std::string, 2> prefix;
+    std::array<std::string, 2> prefix; // Must be destroyed after the databases.
     std::array<DATABUS, prefix.size()> databus;
 
     log("%s", "starting the program");
