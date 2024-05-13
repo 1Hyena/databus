@@ -275,6 +275,7 @@ class DATABUS final {
     static constexpr QUERY make_query_by_id(size_t) noexcept;
     static constexpr QUERY make_query_by_event(EVENT) noexcept;
 
+    static constexpr uint64_t nbo64(uint64_t) noexcept;
     static constexpr EVENT next(EVENT) noexcept;
     static constexpr size_t size(PIPE::TYPE) noexcept;
     static constexpr size_t align(PIPE::TYPE) noexcept;
@@ -298,7 +299,8 @@ class DATABUS final {
     void set_event(BUS &, EVENT, bool val =true) noexcept;
     void rem_event(BUS &, EVENT) noexcept;
     [[nodiscard]] bool has_event(const BUS &, EVENT) const noexcept;
-    void rem_content(BUS &container, BUS &content) const noexcept;
+
+    ERROR transmit(const BUS &) noexcept;
 
     size_t count(INDEX::TYPE, KEY key) const noexcept;
     INDEX::ENTRY find(
@@ -439,7 +441,8 @@ class DATABUS final {
 
     static constexpr struct MEMPOOL make_mempool() noexcept;
 
-    EVENT handled;
+    PIPE incoming;
+    PIPE outgoing;
     ERROR errored;
 
     size_t bus_count;
@@ -466,8 +469,9 @@ inline bool operator!(DATABUS::RESULT result) noexcept {
 
 inline DATABUS::DATABUS() noexcept :
     log_callback(nullptr), log_userdata_callback(nullptr),
-    log_userdata(nullptr), indices{}, mempool{make_mempool()}, handled{},
-    errored{}, bus_count{}, bitset{}, sigset_all{}, sigset_none{}, fuses{} {
+    log_userdata(nullptr), indices{}, mempool{make_mempool()},
+    incoming{}, outgoing{}, errored{}, bus_count{}, bitset{}, sigset_all{},
+    sigset_none{}, fuses{} {
 }
 
 inline DATABUS::~DATABUS() {
@@ -493,7 +497,9 @@ inline DATABUS::~DATABUS() {
 
 inline void DATABUS::clear() noexcept {
     errored = ERROR::NONE;
-    handled = EVENT::NONE;
+
+    destroy(outgoing);
+    destroy(incoming);
 
     for (INDEX &index : indices) {
         if (index.table) {
@@ -612,6 +618,9 @@ inline bool DATABUS::init() noexcept {
             }
         }
     }
+
+    incoming.type = PIPE::TYPE::UINT8;
+    outgoing.type = PIPE::TYPE::UINT8;
 
     return true;
 }
@@ -745,7 +754,14 @@ inline DATABUS::ERROR DATABUS::next_error() noexcept {
     while ( (bus = find_bus(make_query_by_event(EVENT::SYNCHRONIZE))) ) {
         // Here we broadcast all the modified entries to our peers.
 
-        rem_event(*bus, EVENT::SYNCHRONIZE);
+        ERROR error = transmit(*bus);
+
+        if (!error) {
+            rem_event(*bus, EVENT::SYNCHRONIZE);
+        }
+        else {
+            return err(error);
+        }
     }
 
     // Here we accept modified entries from our peers and mark them for
@@ -770,6 +786,10 @@ inline DATABUS::ALERT DATABUS::next_alert() noexcept {
 
     bitset.alerted = false;
 
+    /*if (outgoing.size && !find_bus(make_query_by_event(EVENT::SYNCHRONIZE))) {
+        return make_alert(0, EVENT::SYNCHRONIZE);
+    }*/
+
     for (EVENT event_type : blockers) {
         BUS *const bus = find_bus(make_query_by_event(event_type));
 
@@ -785,6 +805,65 @@ inline DATABUS::ALERT DATABUS::next_alert() noexcept {
     }
 
     return make_alert(0, EVENT::NONE, false);
+}
+
+
+inline size_t DATABUS::read(void *buf, size_t count) noexcept {
+    if (!count) return 0;
+
+    if (incoming.size == 0) {
+        return 0;
+    }
+
+    count = std::min(count, incoming.size);
+
+    if (buf) {
+        std::memcpy(buf, to_uint8(incoming), count);
+    }
+
+    if (incoming.size > count) {
+        std::memmove(
+            incoming.data, to_uint8(incoming) + count, incoming.size - count
+        );
+    }
+
+    incoming.size -= count;
+
+    return count;
+}
+
+inline size_t DATABUS::peek(const char **buf) const noexcept {
+    const size_t size = incoming.size;
+
+    if (buf) {
+        *buf = size > 0 ? to_char(incoming) : nullptr;
+    }
+
+    return size;
+}
+
+inline DATABUS::ERROR DATABUS::write(const void *buf, size_t count) noexcept {
+    if (!buf) {
+        return fuse() ? report_bad_request() : ERROR::BAD_REQUEST;
+    }
+
+    if (count) {
+        const PIPE wrapper{
+            make_pipe(reinterpret_cast<const uint8_t *>(buf), count)
+        };
+
+        ERROR error{ append(wrapper, outgoing) };
+
+        if (error != ERROR::NONE) {
+            return (
+                fuse() ? (
+                    report(error, "%s: %s", __FUNCTION__, to_string(error))
+                ) : error
+            );
+        }
+    }
+
+    return ERROR::NONE;
 }
 
 inline DATABUS::ERROR DATABUS::set_entry(
@@ -1331,6 +1410,54 @@ inline bool DATABUS::has_event(const BUS &bus, EVENT event) const noexcept {
     }
 
     return bus.event_lookup[index] >= 0;
+}
+
+inline DATABUS::ERROR DATABUS::transmit(const BUS &bus) noexcept {
+    const uint64_t nbo_bus_uid = nbo64(bus.id);
+    const uint64_t nbo_msg_len = nbo64(bus.payload.size + sizeof(nbo_bus_uid));
+
+    const PIPE msg_len{
+        make_pipe(
+            reinterpret_cast<const uint8_t *>(&nbo_msg_len), sizeof(nbo_msg_len)
+        )
+    };
+
+    const PIPE bus_uid{
+        make_pipe(
+            reinterpret_cast<const uint8_t *>(&nbo_bus_uid), sizeof(nbo_bus_uid)
+        )
+    };
+
+    ERROR error = reserve(
+        outgoing, msg_len.size + bus_uid.size + bus.payload.size
+    );
+
+    const size_t undo_size = outgoing.size;
+
+    if (!error) {
+        error = append(msg_len, outgoing);
+
+        if (!error) {
+            error = append(bus_uid, outgoing);
+
+            if (!error) {
+                const PIPE bus_payload{
+                    make_pipe(
+                        reinterpret_cast<const uint8_t *>(to_char(bus.payload)),
+                        bus.payload.size
+                    )
+                };
+
+                error = append(bus_payload, outgoing);
+            }
+        }
+    }
+
+    if (error != NO_ERROR) {
+        outgoing.size = undo_size;
+    }
+
+    return error;
 }
 
 inline DATABUS::INDEX::ENTRY DATABUS::find(
@@ -2617,6 +2744,22 @@ constexpr const char *DATABUS::TAIL(const char* snake, char neck) noexcept {
     }
 
     return tail;
+}
+
+constexpr uint64_t DATABUS::nbo64(uint64_t val) noexcept {
+    static_assert(
+        (
+            std::endian::native == std::endian::big ||
+            std::endian::native == std::endian::little
+        ),
+        "mixed-endian processors are not supported"
+    );
+
+    if constexpr (std::endian::native == std::endian::little) {
+        return std::byteswap(val);
+    }
+
+    return val;
 }
 
 inline int DATABUS::clz(unsigned int x) noexcept {

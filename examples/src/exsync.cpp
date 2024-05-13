@@ -4,6 +4,7 @@
 #include <thread>
 #include <string>
 #include <array>
+#include <cinttypes>
 
 static void handle(DATABUS &, DATABUS::ALERT &, size_t);
 
@@ -81,5 +82,21 @@ int main(int argc, char **argv) {
 }
 
 void handle(DATABUS &db, DATABUS::ALERT &alert, size_t index) {
-    log("DB %lu: %lu: %s", index + 1, alert.entry, db.to_string(alert.event));
+    switch (alert.event) {
+        case DATABUS::SERIALIZE: {
+            const char *str = db.get_entry(alert.entry).c_str;
+            std::intmax_t val = std::strtoimax(str, nullptr, 10);
+
+            ++val;
+
+            db.set_entry(alert.entry, std::to_string(val).c_str());
+            break;
+        }
+        default: break;
+    }
+
+    log(
+        "DB %lu: %s of #%lu: %s", index + 1, db.to_string(alert.event),
+        alert.entry, db.get_entry(alert.entry).c_str
+    );
 }
