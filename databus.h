@@ -25,8 +25,11 @@
 #ifndef DATABUS_H_17_04_2024
 #define DATABUS_H_17_04_2024
 
+#include <bit>
 #include <algorithm>
 #include <limits>
+#include <array>
+#include <numeric>
 
 #include <csignal>
 #include <cstdint>
@@ -110,22 +113,30 @@ class DATABUS final {
 
     bool init() noexcept;
     bool deinit() noexcept;
+    bool idle() const noexcept;
 
     void set_logger(void (*callback)(ERROR, const char *) noexcept) noexcept;
     void set_logger(
         void (*callback)(ERROR, const char *, void *) noexcept, void *userdata
     ) noexcept;
     void set_memcap(size_t bytes) noexcept;
+    void set_matrix(
+        size_t index, size_t size,
+        const char *file =LEAF(__builtin_FILE()), int line =__builtin_LINE()
+    ) noexcept;
     size_t get_memcap() const noexcept;
     size_t get_memtop() const noexcept;
 
     ERROR next_error() noexcept;
     ERROR last_error() noexcept;
     ALERT next_alert() noexcept;
+    void  kick_start() noexcept;
 
-    size_t peek(const char **buf =nullptr) const noexcept;
+    size_t peek(const void **buf =nullptr) const noexcept;
     size_t read(void *buf, size_t count) noexcept;
-    ERROR write(const void *buf, size_t count) noexcept;
+    [[nodiscard]] ERROR write(const void *buf, size_t count) noexcept;
+    size_t reserve(size_t size) noexcept;
+    size_t capacity() noexcept;
 
     ERROR set_entry(size_t id, const void *data, size_t size) noexcept;
     ERROR set_entry(size_t id, const char *c_str) noexcept;
@@ -136,6 +147,18 @@ class DATABUS final {
     };
 
     private:
+    struct PACKET {
+        enum class TYPE : uint8_t {
+            NONE = 0,
+            ENTRY,
+            PULSE
+        };
+
+        size_t size;
+        void  *data;
+        TYPE   type;
+    };
+
     struct MEMORY {
         size_t     size;
         void      *data;
@@ -213,6 +236,7 @@ class DATABUS final {
         size_t id;
         ssize_t event_lookup[ static_cast<size_t>(EVENT::MAX_EVENTS) ];
         PIPE payload;
+        uint16_t db;
         /*
         PIPE contents;
         struct CONTAINER {
@@ -276,7 +300,6 @@ class DATABUS final {
     static constexpr QUERY make_query_by_event(EVENT) noexcept;
 
     static constexpr uint64_t nbo64(uint64_t) noexcept;
-    static constexpr EVENT next(EVENT) noexcept;
     static constexpr size_t size(PIPE::TYPE) noexcept;
     static constexpr size_t align(PIPE::TYPE) noexcept;
     static constexpr auto fmt_bytes(size_t) noexcept;
@@ -288,7 +311,14 @@ class DATABUS final {
     static unsigned int       next_pow2(unsigned int) noexcept;
     static unsigned long      next_pow2(unsigned long) noexcept;
     static unsigned long long next_pow2(unsigned long long) noexcept;
+    static size_t encode(
+        uint64_t, void * =nullptr, size_t =std::numeric_limits<size_t>::max()
+    ) noexcept;
+    static size_t encode(uint64_t, std::array<uint8_t, 10> &) noexcept;
+    static size_t decode(const void *, size_t, uint64_t *) noexcept;
 
+    ERROR create_entry(size_t id, const void *data, size_t size) noexcept;
+    ERROR update_entry(size_t id, const void *data, size_t size) noexcept;
     [[nodiscard]] ERROR capture(const BUS &copy) noexcept;
     void release(BUS *) noexcept;
 
@@ -300,7 +330,15 @@ class DATABUS final {
     void rem_event(BUS &, EVENT) noexcept;
     [[nodiscard]] bool has_event(const BUS &, EVENT) const noexcept;
 
+    ERROR transmit(
+        std::initializer_list<uint64_t> headers,
+        const void *data =nullptr, size_t size =0
+    ) noexcept;
     ERROR transmit(const BUS &) noexcept;
+    ERROR transmit_pulse() noexcept;
+    ERROR receive() noexcept;
+    ERROR receive_entry(const uint8_t *data, size_t len) noexcept;
+    ERROR receive_pulse(const uint8_t *data, size_t len) noexcept;
 
     size_t count(INDEX::TYPE, KEY key) const noexcept;
     INDEX::ENTRY find(
@@ -329,7 +367,8 @@ class DATABUS final {
     [[nodiscard]] ERROR insert(PIPE&, PIPE::ENTRY) noexcept;
     [[nodiscard]] ERROR insert(PIPE&, size_t index, PIPE::ENTRY) noexcept;
     [[nodiscard]] ERROR copy(const PIPE &src, PIPE &dst) noexcept;
-    [[nodiscard]] ERROR append(const PIPE &src, PIPE &dst) noexcept;
+    [[nodiscard]] ERROR append(PIPE &dst, const PIPE &src) noexcept;
+    [[nodiscard]] ERROR append(PIPE &dst, const uint8_t*, size_t) noexcept;
     [[nodiscard]] ERROR null_terminate(PIPE &) noexcept;
     void null_terminate(PIPE &) const noexcept;
     void replace(PIPE&, size_t index, PIPE::ENTRY) const noexcept;
@@ -441,14 +480,31 @@ class DATABUS final {
 
     static constexpr struct MEMPOOL make_mempool() noexcept;
 
+    struct MACHINE {
+        enum class STATE : uint8_t {
+            NONE = 0,
+            SERIALIZING,
+            SYNCHRONIZING,
+            DESERIALIZING,
+            FINALIZING
+        };
+
+        size_t index;
+        size_t nodes;
+        size_t buses;
+        size_t pulse;
+        STATE  state;
+    } machine;
+
+    static constexpr struct MACHINE make_machine() noexcept;
+
     PIPE incoming;
     PIPE outgoing;
     ERROR errored;
 
-    size_t bus_count;
-
     struct BITSET {
         bool alerted:1;
+        bool synched:1;
         bool reindex:1;
     } bitset;
 
@@ -470,8 +526,8 @@ inline bool operator!(DATABUS::RESULT result) noexcept {
 inline DATABUS::DATABUS() noexcept :
     log_callback(nullptr), log_userdata_callback(nullptr),
     log_userdata(nullptr), indices{}, mempool{make_mempool()},
-    incoming{}, outgoing{}, errored{}, bus_count{}, bitset{}, sigset_all{},
-    sigset_none{}, fuses{} {
+    machine{make_machine()}, incoming{}, outgoing{}, errored{},
+    bitset{}, sigset_all{}, sigset_none{}, fuses{} {
 }
 
 inline DATABUS::~DATABUS() {
@@ -531,13 +587,24 @@ inline void DATABUS::clear() noexcept {
     mempool.usage = sizeof(DATABUS);
     mempool.top = mempool.usage;
 
-    bus_count = 0;
+    size_t machine_index = machine.index;
+    size_t machine_nodes = machine.nodes;
+    machine = make_machine();
+    machine.index = machine_index;
+    machine.nodes = machine_nodes;
+
     bitset = {};
 
     std::fill(fuses, fuses+sizeof(fuses), 0);
 }
 
 inline bool DATABUS::init() noexcept {
+    if (machine.index >= machine.nodes) {
+        log("%s: invalid matrix configuration", __FUNCTION__);
+
+        return false;
+    }
+
     for (INDEX &index : indices) {
         if (index.type != INDEX::TYPE::NONE) {
             log("%s: already initialized", __FUNCTION__);
@@ -621,6 +688,7 @@ inline bool DATABUS::init() noexcept {
 
     incoming.type = PIPE::TYPE::UINT8;
     outgoing.type = PIPE::TYPE::UINT8;
+    machine.state = MACHINE::STATE::SERIALIZING;
 
     return true;
 }
@@ -661,6 +729,21 @@ inline void DATABUS::set_logger(
 
 inline void DATABUS::set_memcap(size_t bytes) noexcept {
     mempool.cap = bytes;
+}
+
+inline void DATABUS::set_matrix(
+    size_t index, size_t size, const char *file, int line
+) noexcept {
+    if (index >= size) {
+        log("%s: invalid parameters (%s:%d)", __FUNCTION__, file, line);
+    }
+
+    if (index > std::numeric_limits<decltype(BUS::db)>::max()) {
+        log("%s: index too large (%s:%d)", __FUNCTION__, file, line);
+    }
+
+    machine.index = index;
+    machine.nodes = size;
 }
 
 inline size_t DATABUS::get_memcap() const noexcept {
@@ -718,125 +801,188 @@ inline DATABUS::ERROR DATABUS::next_error() noexcept {
         return err(ERROR::OUT_OF_MEMORY);
     }
 
-    if (bitset.reindex) {
-        ERROR error{ reindex() };
+    switch (machine.state) {
+        case MACHINE::STATE::SERIALIZING: {
+            if (find_bus(make_query_by_event(EVENT::SERIALIZE))) {
+                if (!bitset.alerted) {
+                    bitset.alerted = true;
 
-        if (error != ERROR::NONE) {
+                    return ERROR::NONE;
+                }
+
+                return report(
+                    ERROR::PENDING_ALERT,
+                    "%s", "cannot proceed if there are unhandled events"
+                );
+            }
+
+            BUS *bus;
+
+            while ((bus = find_bus(make_query_by_event(EVENT::SYNCHRONIZE)))) {
+                ERROR error = transmit(*bus);
+
+                if (!error) {
+                    rem_event(*bus, EVENT::SYNCHRONIZE);
+                }
+                else {
+                    return err(error);
+                }
+            }
+
+            ERROR error = transmit_pulse();
+
+            if (!error) {
+                machine.state = MACHINE::STATE::SYNCHRONIZING;
+
+                break;
+            }
+
             return err(error);
         }
-    }
+        case MACHINE::STATE::SYNCHRONIZING: {
+            bitset.synched = false;
 
-    static constexpr const EVENT blockers[]{
-        EVENT::SERIALIZE, EVENT::DESERIALIZE
-    };
+            if (machine.pulse < machine.nodes && incoming.size) {
+                ERROR error = receive();
 
-    for (EVENT event_type : blockers) {
-        if (!find_bus(make_query_by_event(event_type))) {
-            continue;
+                if (error != NO_ERROR) {
+                    return err(error);
+                }
+            }
+
+            if (outgoing.size || machine.pulse < machine.nodes) {
+                return ERROR::NONE;
+            }
+
+            machine.state = MACHINE::STATE::DESERIALIZING;
+
+            break;
         }
+        case MACHINE::STATE::DESERIALIZING: {
+            if (bitset.reindex) {
+                ERROR error{ reindex() };
 
-        if (!bitset.alerted) {
-            bitset.alerted = true;
+                if (error != ERROR::NONE) {
+                    return err(error);
+                }
+            }
 
-            return ERROR::NONE;
+            if (!find_bus(make_query_by_event(EVENT::DESERIALIZE))) {
+                machine.state = MACHINE::STATE::FINALIZING;
+                break;
+            }
+
+            if (!bitset.alerted) {
+                bitset.alerted = true;
+
+                return ERROR::NONE;
+            }
+
+            return report(
+                ERROR::PENDING_ALERT,
+                "%s", "cannot proceed if there are unhandled events"
+            );
         }
+        case MACHINE::STATE::FINALIZING: {
+            BUS *bus;
 
-        return report(
-            ERROR::PENDING_ALERT,
-            "%s", "cannot proceed if there are unhandled events"
-        );
-    }
+            while ( (bus = find_bus(make_query_by_event(EVENT::FINALIZE))) ) {
+                rem_event(*bus, EVENT::FINALIZE);
+                set_event(*bus, EVENT::SERIALIZE);
+            }
 
-    bitset.alerted = false;
+            machine.pulse = 1;
 
-    BUS *bus;
-
-    while ( (bus = find_bus(make_query_by_event(EVENT::SYNCHRONIZE))) ) {
-        // Here we broadcast all the modified entries to our peers.
-
-        ERROR error = transmit(*bus);
-
-        if (!error) {
-            rem_event(*bus, EVENT::SYNCHRONIZE);
+            break;
         }
-        else {
-            return err(error);
-        }
-    }
-
-    // Here we accept modified entries from our peers and mark them for
-    // deserialization.
-
-    if (find_bus(make_query_by_event(EVENT::DESERIALIZE))) {
-        return err(ERROR::NONE);
-    }
-
-    while ( (bus = find_bus(make_query_by_event(EVENT::FINALIZE))) ) {
-        rem_event(*bus, EVENT::FINALIZE);
-        set_event(*bus, EVENT::SERIALIZE);
+        default: break;
     }
 
     return err(ERROR::NONE);
 }
 
 inline DATABUS::ALERT DATABUS::next_alert() noexcept {
-    static constexpr const EVENT blockers[]{
-        EVENT::SERIALIZE, EVENT::DESERIALIZE
-    };
-
     bitset.alerted = false;
 
-    /*if (outgoing.size && !find_bus(make_query_by_event(EVENT::SYNCHRONIZE))) {
-        return make_alert(0, EVENT::SYNCHRONIZE);
-    }*/
+    switch (machine.state) {
+        case MACHINE::STATE::SERIALIZING: {
+            BUS *const bus = find_bus(make_query_by_event(EVENT::SERIALIZE));
 
-    for (EVENT event_type : blockers) {
-        BUS *const bus = find_bus(make_query_by_event(event_type));
-
-        if (bus) {
-            rem_event(*bus, event_type);
-
-            if (event_type == EVENT::SERIALIZE) {
+            if (bus) {
+                rem_event(*bus, EVENT::SERIALIZE);
                 set_event(*bus, EVENT::FINALIZE);
+
+                return make_alert(bus->id, EVENT::SERIALIZE);
             }
 
-            return make_alert(bus->id, event_type);
+            break;
+        }
+        case MACHINE::STATE::SYNCHRONIZING: {
+            if (outgoing.size && !bitset.synched) {
+                bitset.synched = true;
+
+                return make_alert(0, EVENT::SYNCHRONIZE);
+            }
+
+            break;
+        }
+        case MACHINE::STATE::DESERIALIZING: {
+            BUS *const bus = find_bus(make_query_by_event(EVENT::DESERIALIZE));
+
+            if (bus) {
+                rem_event(*bus, EVENT::DESERIALIZE);
+                return make_alert(bus->id, EVENT::DESERIALIZE);
+            }
+
+            break;
+        }
+        default: {
+            break;
         }
     }
 
     return make_alert(0, EVENT::NONE, false);
 }
 
+inline bool DATABUS::idle() const noexcept {
+    return machine.state == MACHINE::STATE::FINALIZING && machine.pulse == 1;
+}
+
+inline void DATABUS::kick_start() noexcept {
+    if (idle()) {
+        machine.state = MACHINE::STATE::SERIALIZING;
+    }
+}
 
 inline size_t DATABUS::read(void *buf, size_t count) noexcept {
     if (!count) return 0;
 
-    if (incoming.size == 0) {
+    if (outgoing.size == 0) {
         return 0;
     }
 
-    count = std::min(count, incoming.size);
+    count = std::min(count, outgoing.size);
 
     if (buf) {
-        std::memcpy(buf, to_uint8(incoming), count);
+        std::memcpy(buf, to_uint8(outgoing), count);
     }
 
-    if (incoming.size > count) {
+    if (outgoing.size > count) {
         std::memmove(
-            incoming.data, to_uint8(incoming) + count, incoming.size - count
+            outgoing.data, to_uint8(outgoing) + count, outgoing.size - count
         );
     }
 
-    incoming.size -= count;
+    outgoing.size -= count;
 
     return count;
 }
 
-inline size_t DATABUS::peek(const char **buf) const noexcept {
-    const size_t size = incoming.size;
+inline size_t DATABUS::peek(const void **buf) const noexcept {
+    const size_t size = outgoing.size;
 
     if (buf) {
-        *buf = size > 0 ? to_char(incoming) : nullptr;
+        *buf = size > 0 ? to_uint8(outgoing) : nullptr;
     }
 
     return size;
@@ -848,25 +994,75 @@ inline DATABUS::ERROR DATABUS::write(const void *buf, size_t count) noexcept {
     }
 
     if (count) {
-        const PIPE wrapper{
-            make_pipe(reinterpret_cast<const uint8_t *>(buf), count)
+        ERROR error{
+            append(incoming, reinterpret_cast<const uint8_t *>(buf), count)
         };
 
-        ERROR error{ append(wrapper, outgoing) };
-
-        if (error != ERROR::NONE) {
+        if (error != NO_ERROR && error != OUT_OF_MEMORY) {
             return (
                 fuse() ? (
                     report(error, "%s: %s", __FUNCTION__, to_string(error))
                 ) : error
             );
         }
+        else {
+            return error;
+        }
     }
 
     return ERROR::NONE;
 }
 
-inline DATABUS::ERROR DATABUS::set_entry(
+inline size_t DATABUS::reserve(size_t count) noexcept {
+    if (count > capacity()) {
+        ERROR error = reserve(incoming, incoming.size + count);
+
+        if (error != NO_ERROR && error != OUT_OF_MEMORY) {
+            if (fuse()) {
+                report(error, "%s: %s", __FUNCTION__, to_string(error));
+            }
+        }
+    }
+
+    return std::min(count, capacity());
+}
+
+inline size_t DATABUS::capacity() noexcept {
+    return incoming.capacity - incoming.size;
+}
+
+inline DATABUS::ERROR DATABUS::create_entry(
+    size_t id, const void *data, size_t size
+) noexcept {
+    if (id == 0) {
+        return fuse() ? report_bad_request() : ERROR::BAD_REQUEST;
+    }
+
+    ERROR error = NO_ERROR;
+
+    BUS *bus = find_bus(make_query_by_id(id));
+
+    if (bus) {
+        return fuse() ? report_bad_request() : ERROR::BAD_REQUEST;
+    }
+
+    const BUS copy_from{
+        make_bus(id, make_pipe(data, size, PIPE::TYPE::C_STR))
+    };
+
+    error = capture(copy_from);
+
+    if (!error) {
+        bus = &get_bus(make_query_by_id(id));
+
+        set_event(*bus, EVENT::SERIALIZE);
+        set_event(*bus, EVENT::SYNCHRONIZE);
+    }
+
+    return error;
+}
+
+inline DATABUS::ERROR DATABUS::update_entry(
     size_t id, const void *data, size_t size
 ) noexcept {
     if (id == 0) {
@@ -883,17 +1079,7 @@ inline DATABUS::ERROR DATABUS::set_entry(
         error = copy(payload_wrapper, bus->payload);
     }
     else {
-        const BUS copy_from{
-            make_bus(id, make_pipe(data, size, PIPE::TYPE::C_STR))
-        };
-
-        error = capture(copy_from);
-
-        if (!error) {
-            bus = &get_bus(make_query_by_id(id));
-
-            set_event(*bus, EVENT::SERIALIZE);
-        }
+        return fuse() ? report_bad_request() : ERROR::BAD_REQUEST;
     }
 
     if (!error) {
@@ -901,6 +1087,22 @@ inline DATABUS::ERROR DATABUS::set_entry(
     }
 
     return error;
+}
+
+inline DATABUS::ERROR DATABUS::set_entry(
+    size_t id, const void *data, size_t size
+) noexcept {
+    if (id == 0) {
+        return fuse() ? report_bad_request() : ERROR::BAD_REQUEST;
+    }
+
+    if (machine.state != MACHINE::STATE::SERIALIZING) {
+        return fuse() ? report_bad_request() : ERROR::BAD_REQUEST;
+    }
+
+    BUS *bus = find_bus(make_query_by_id(id));
+
+    return bus ? update_entry(id, data, size) : create_entry(id, data, size);
 }
 
 inline DATABUS::ERROR DATABUS::set_entry(
@@ -1097,7 +1299,7 @@ inline DATABUS::ERROR DATABUS::capture(const BUS &copy) noexcept {
             reserve(
                 INDEX::TYPE::EVENT_TO_BUS,
                 make_key(static_cast<EVENT>(&ev - &(copy.event_lookup[0]))),
-                bus_count + 1
+                machine.buses + 1
             )
         };
 
@@ -1143,7 +1345,7 @@ inline DATABUS::ERROR DATABUS::capture(const BUS &copy) noexcept {
     }
 
     if (!error) {
-        ++bus_count;
+        ++machine.buses;
 
         return ERROR::NONE;
     }
@@ -1166,7 +1368,7 @@ inline void DATABUS::release(BUS *bus) noexcept {
     destroy(bus->payload);
 
     if (erase(INDEX::TYPE::ID_TO_BUS, make_key(bus->id))) {
-        --bus_count;
+        --machine.buses;
     }
 
     recycle(get_memory(bus));
@@ -1412,45 +1614,51 @@ inline bool DATABUS::has_event(const BUS &bus, EVENT event) const noexcept {
     return bus.event_lookup[index] >= 0;
 }
 
-inline DATABUS::ERROR DATABUS::transmit(const BUS &bus) noexcept {
-    const uint64_t nbo_bus_uid = nbo64(bus.id);
-    const uint64_t nbo_msg_len = nbo64(bus.payload.size + sizeof(nbo_bus_uid));
+inline DATABUS::ERROR DATABUS::transmit(
+    std::initializer_list<uint64_t> headers, const void *data, size_t size
+) noexcept {
+    if (!data) {
+        size = 0;
+    }
 
-    const PIPE msg_len{
-        make_pipe(
-            reinterpret_cast<const uint8_t *>(&nbo_msg_len), sizeof(nbo_msg_len)
-        )
-    };
-
-    const PIPE bus_uid{
-        make_pipe(
-            reinterpret_cast<const uint8_t *>(&nbo_bus_uid), sizeof(nbo_bus_uid)
-        )
-    };
-
-    ERROR error = reserve(
-        outgoing, msg_len.size + bus_uid.size + bus.payload.size
+    size_t packet_size = std::accumulate(
+        headers.begin(), headers.end(), size,
+        [](size_t sum, uint64_t h) {
+            return sum + encode(h);
+        }
     );
 
     const size_t undo_size = outgoing.size;
+    ERROR error = reserve(outgoing, encode(packet_size) + packet_size);
 
     if (!error) {
-        error = append(msg_len, outgoing);
+        std::array<uint8_t, 10> buf;
 
-        if (!error) {
-            error = append(bus_uid, outgoing);
+        size_t len = encode(packet_size, buf);
 
-            if (!error) {
-                const PIPE bus_payload{
-                    make_pipe(
-                        reinterpret_cast<const uint8_t *>(to_char(bus.payload)),
-                        bus.payload.size
-                    )
-                };
+        if (len) {
+            error = append(outgoing, buf.data(), len);
 
-                error = append(bus_payload, outgoing);
+            for (auto &h : headers) {
+                len = encode(h, buf);
+
+                if (len) {
+                    error = append(outgoing, buf.data(), len);
+                }
+                else error = report_bug();
+
+                if (error != NO_ERROR) {
+                    break;
+                }
+            }
+
+            if (size) {
+                error = append(
+                    outgoing, reinterpret_cast<const uint8_t *>(data), size
+                );
             }
         }
+        else error = report_bug();
     }
 
     if (error != NO_ERROR) {
@@ -1458,6 +1666,147 @@ inline DATABUS::ERROR DATABUS::transmit(const BUS &bus) noexcept {
     }
 
     return error;
+}
+
+inline DATABUS::ERROR DATABUS::transmit(const BUS &bus) noexcept {
+    return transmit(
+        { static_cast<uint64_t>(PACKET::TYPE::ENTRY), bus.id },
+        reinterpret_cast<const uint8_t *>(to_char(bus.payload)),
+        bus.payload.size
+    );
+}
+
+inline DATABUS::ERROR DATABUS::receive() noexcept {
+    ERROR error = NO_ERROR;
+    const uint8_t *message = to_uint8(incoming);
+    size_t received = 0;
+
+    for (;;) {
+        uint64_t msglen = 0;
+        size_t lenlen = decode(
+            message + received, incoming.size - received, &msglen
+        );
+
+        if (!lenlen) {
+            break;
+        }
+
+        if (lenlen + msglen > incoming.size) {
+            break;
+        }
+
+        uint64_t msgtype = 0;
+        size_t parsed = received + lenlen;
+        size_t decoded = decode(
+            message + parsed, incoming.size - parsed, &msgtype
+        );
+
+        if (!decoded) {
+            error = fuse() ? report_bug() : LIBRARY_ERROR;
+
+            break;
+        }
+
+        parsed += decoded;
+
+        size_t payload_len = std::min(msglen - decoded, incoming.size - parsed);
+
+        switch (static_cast<PACKET::TYPE>(msgtype)) {
+            case PACKET::TYPE::ENTRY: {
+                error = receive_entry(message + parsed, payload_len);
+
+                break;
+            }
+            case PACKET::TYPE::PULSE: {
+                error = receive_pulse(message + parsed, payload_len);
+
+                break;
+            }
+            default: {
+                error = report_bug();
+
+                break;
+            }
+        }
+
+        if (error != NO_ERROR) {
+            break;
+        }
+
+        received += lenlen + msglen;
+    }
+
+    if (received) {
+        if (incoming.size > received) {
+            std::memmove(
+                incoming.data,
+                to_uint8(incoming) + received, incoming.size - received
+            );
+        }
+
+        incoming.size -= received;
+    }
+
+    return error;
+}
+
+inline DATABUS::ERROR DATABUS::receive_pulse(
+    const uint8_t *data, size_t len
+) noexcept {
+    uint64_t value = 0;
+    size_t decoded = decode(data, len, &value);
+
+    if (decoded) {
+        ++machine.pulse;
+    }
+    else return report_bug();
+
+    return NO_ERROR;
+}
+
+inline DATABUS::ERROR DATABUS::receive_entry(
+    const uint8_t *data, size_t len
+) noexcept {
+    uint64_t value = 0;
+    size_t decoded = decode(data, len, &value);
+
+    if (!decoded) {
+        return report_bug();
+    }
+
+    ERROR error = NO_ERROR;
+    BUS *bus = find_bus(make_query_by_id(value));
+
+    if (bus) {
+        if (bus->payload.size == len
+        && !std::memcmp(to_char(bus->payload), data, len)) {
+            return NO_ERROR;
+        }
+
+        error = update_entry(value, data + decoded, len - decoded);
+    }
+    else {
+        error = create_entry(value, data + decoded, len - decoded);
+    }
+
+    if (!error) {
+        if (!bus) {
+            bus = find_bus(make_query_by_id(value));
+        }
+
+        if (bus) {
+            set_event(*bus, EVENT::DESERIALIZE);
+        }
+        else die();
+    }
+
+    return error;
+}
+
+inline DATABUS::ERROR DATABUS::transmit_pulse() noexcept {
+    return transmit(
+        { static_cast<uint64_t>(PACKET::TYPE::PULSE), machine.index }
+    );
 }
 
 inline DATABUS::INDEX::ENTRY DATABUS::find(
@@ -1844,10 +2193,10 @@ inline DATABUS::ERROR DATABUS::copy(const PIPE &src, PIPE &dst) noexcept {
 
     dst.size = 0;
 
-    return append(src, dst);
+    return append(dst, src);
 }
 
-inline DATABUS::ERROR DATABUS::append(const PIPE &src, PIPE &dst) noexcept {
+inline DATABUS::ERROR DATABUS::append(PIPE &dst, const PIPE &src) noexcept {
     if (src.type != dst.type
     ||  dst.type == PIPE::TYPE::NONE) {
         die();
@@ -1881,6 +2230,12 @@ inline DATABUS::ERROR DATABUS::append(const PIPE &src, PIPE &dst) noexcept {
     std::memcpy(to_ptr(dst, old_size), to_ptr(src, 0), count * size(dst.type));
 
     return ERROR::NONE;
+}
+
+inline DATABUS::ERROR DATABUS::append(
+    PIPE &dst, const uint8_t *src, size_t len
+) noexcept {
+    return append(dst, make_pipe(src, len));
 }
 
 inline DATABUS::ERROR DATABUS::null_terminate(PIPE &pipe) noexcept {
@@ -2419,11 +2774,7 @@ inline DATABUS::RESULT DATABUS::call_pthread_sigmask(
 }
 
 constexpr DATABUS::KEY DATABUS::make_key(uintptr_t val) noexcept {
-    return
-#if __cplusplus <= 201703L
-    __extension__
-#endif
-    DATABUS::KEY{
+    return DATABUS::KEY{
         .value = val
     };
 }
@@ -2436,11 +2787,7 @@ constexpr DATABUS::RESULT DATABUS::make_result(
     int value, int code, ERROR error,
     const char *text, const char *call, const char *file, int line
 ) noexcept {
-    return
-#if __cplusplus <= 201703L
-    __extension__
-#endif
-    RESULT{
+    return RESULT{
         .value = value,
         .code  = code,
         .text  = text,
@@ -2452,13 +2799,11 @@ constexpr DATABUS::RESULT DATABUS::make_result(
 }
 
 constexpr DATABUS::BUS DATABUS::make_bus(size_t id, PIPE payload) noexcept {
-#if __cplusplus <= 201703L
-    __extension__
-#endif
     BUS bus{
         .id{id},
         .event_lookup{},
-        .payload{payload}
+        .payload{payload},
+        .db{},
     };
 
     for (auto &lookup_value : bus.event_lookup) {
@@ -2469,11 +2814,7 @@ constexpr DATABUS::BUS DATABUS::make_bus(size_t id, PIPE payload) noexcept {
 }
 
 constexpr DATABUS::MEMPOOL DATABUS::make_mempool() noexcept {
-    return
-#if __cplusplus <= 201703L
-    __extension__
-#endif
-    DATABUS::MEMPOOL{
+    return DATABUS::MEMPOOL{
         .free  = {},
         .list  = nullptr,
         .usage = 0,
@@ -2483,14 +2824,20 @@ constexpr DATABUS::MEMPOOL DATABUS::make_mempool() noexcept {
     };
 }
 
+constexpr DATABUS::MACHINE DATABUS::make_machine() noexcept {
+    return DATABUS::MACHINE{
+        .index = {},
+        .nodes = {},
+        .buses = {},
+        .pulse = 1,
+        .state = {}
+    };
+}
+
 constexpr DATABUS::ALERT DATABUS::make_alert(
     size_t entry, EVENT event, bool valid
 ) noexcept {
-    return
-#if __cplusplus <= 201703L
-    __extension__
-#endif
-    ALERT{
+    return ALERT{
         .entry = entry,
         .event = event,
         .valid = valid
@@ -2500,11 +2847,7 @@ constexpr DATABUS::ALERT DATABUS::make_alert(
 constexpr DATABUS::ENTRY DATABUS::make_entry(
     size_t id, size_t size, void *data, ERROR error, bool valid
 ) noexcept {
-    return
-#if __cplusplus <= 201703L
-    __extension__
-#endif
-    ENTRY{
+    return ENTRY{
         .id    = id,
         .size  = size,
         .data  = data,
@@ -2521,11 +2864,7 @@ constexpr DATABUS::ENTRY DATABUS::make_entry(ERROR error) noexcept {
 constexpr struct DATABUS::INDEX::ENTRY DATABUS::make_index_entry(
     PIPE &keys, PIPE &values, size_t index, ERROR error, bool valid
 ) noexcept {
-    return
-#if __cplusplus <= 201703L
-    __extension__
-#endif
-    DATABUS::INDEX::ENTRY{
+    return DATABUS::INDEX::ENTRY{
         .key_pipe = &keys,
         .val_pipe = &values,
         .index    = index,
@@ -2543,11 +2882,7 @@ constexpr struct DATABUS::INDEX::ENTRY DATABUS::make_index_entry(
 constexpr DATABUS::PIPE DATABUS::make_pipe(
     const void *data, size_t size, PIPE::TYPE type
 ) noexcept {
-    return
-#if __cplusplus <= 201703L
-    __extension__
-#endif
-    DATABUS::PIPE{
+    return DATABUS::PIPE{
         .capacity = size,
         .size = size,
         .data = const_cast<void *>(data),
@@ -2557,11 +2892,7 @@ constexpr DATABUS::PIPE DATABUS::make_pipe(
 }
 
 constexpr DATABUS::PIPE DATABUS::make_pipe(PIPE::TYPE type) noexcept {
-    return
-#if __cplusplus <= 201703L
-    __extension__
-#endif
-    DATABUS::PIPE{
+    return DATABUS::PIPE{
         .capacity = 0,
         .size = 0,
         .data = nullptr,
@@ -2581,11 +2912,7 @@ constexpr struct DATABUS::PIPE::ENTRY DATABUS::make_pipe_entry(
 constexpr struct DATABUS::PIPE::ENTRY DATABUS::make_pipe_entry(
     uint64_t value
 ) noexcept {
-    return
-#if __cplusplus <= 201703L
-    __extension__
-#endif
-    DATABUS::PIPE::ENTRY{
+    return DATABUS::PIPE::ENTRY{
         .as_uint64 = value,
         .type = PIPE::TYPE::UINT64
     };
@@ -2594,11 +2921,7 @@ constexpr struct DATABUS::PIPE::ENTRY DATABUS::make_pipe_entry(
 constexpr struct DATABUS::PIPE::ENTRY DATABUS::make_pipe_entry(
     KEY value
 ) noexcept {
-    return
-#if __cplusplus <= 201703L
-    __extension__
-#endif
-    DATABUS::PIPE::ENTRY{
+    return DATABUS::PIPE::ENTRY{
         .as_key = value,
         .type = PIPE::TYPE::KEY
     };
@@ -2607,11 +2930,7 @@ constexpr struct DATABUS::PIPE::ENTRY DATABUS::make_pipe_entry(
 constexpr struct DATABUS::PIPE::ENTRY DATABUS::make_pipe_entry(
     BUS *value
 ) noexcept {
-    return
-#if __cplusplus <= 201703L
-    __extension__
-#endif
-    DATABUS::PIPE::ENTRY{
+    return DATABUS::PIPE::ENTRY{
         .as_ptr = value,
         .type = PIPE::TYPE::BUS_PTR
     };
@@ -2620,11 +2939,7 @@ constexpr struct DATABUS::PIPE::ENTRY DATABUS::make_pipe_entry(
 constexpr struct DATABUS::PIPE::ENTRY DATABUS::make_pipe_entry(
     MEMORY *value
 ) noexcept {
-    return
-#if __cplusplus <= 201703L
-    __extension__
-#endif
-    DATABUS::PIPE::ENTRY{
+    return DATABUS::PIPE::ENTRY{
         .as_ptr = value,
         .type = PIPE::TYPE::MEMORY_PTR
     };
@@ -2633,11 +2948,7 @@ constexpr struct DATABUS::PIPE::ENTRY DATABUS::make_pipe_entry(
 constexpr struct DATABUS::QUERY DATABUS::make_query_by_event(
     EVENT event
 ) noexcept {
-    return
-#if __cplusplus <= 201703L
-    __extension__
-#endif
-    QUERY{
+    return QUERY{
         .bus_event = event,
         .type = QUERY::TYPE::BUS_BY_EVENT
     };
@@ -2646,11 +2957,7 @@ constexpr struct DATABUS::QUERY DATABUS::make_query_by_event(
 constexpr struct DATABUS::QUERY DATABUS::make_query_by_id(
     size_t bus_id
 ) noexcept {
-    return
-#if __cplusplus <= 201703L
-    __extension__
-#endif
-    QUERY{
+    return QUERY{
         .bus_id = bus_id,
         .type = QUERY::TYPE::BUS_BY_ID
     };
@@ -2681,14 +2988,6 @@ constexpr const char *DATABUS::to_string(EVENT event) noexcept {
     }
 
     return "undefined event";
-}
-
-constexpr DATABUS::EVENT DATABUS::next(EVENT event_type) noexcept {
-    return static_cast<EVENT>(
-        (static_cast<size_t>(event_type) + 1) % (
-            static_cast<size_t>(EVENT::MAX_EVENTS)
-        )
-    );
 }
 
 constexpr size_t DATABUS::size(PIPE::TYPE type) noexcept {
@@ -2760,6 +3059,68 @@ constexpr uint64_t DATABUS::nbo64(uint64_t val) noexcept {
     }
 
     return val;
+}
+
+inline size_t DATABUS::encode(
+    uint64_t num, std::array<uint8_t, 10> &buf
+) noexcept {
+    for (size_t pos = 0; pos < buf.size();) {
+        uint8_t oct = num & 0x7f;
+        num >>= 7;
+
+        if (!num) {
+            buf[pos++] = 0x80 | oct;
+
+            return pos;
+        }
+
+        buf[pos++] = oct;
+        --num;
+    }
+
+    return 0;
+}
+
+inline size_t DATABUS::encode(uint64_t num, void *out, size_t len) noexcept {
+    std::array<uint8_t, 10> buf;
+
+    size_t ret = encode(num, buf);
+
+    if (ret <= len) {
+        if (out) {
+            std::memcpy(out, buf.data(), ret);
+        }
+
+        return ret;
+    }
+
+    return 0;
+}
+
+inline size_t DATABUS::decode(
+    const void *in, size_t len, uint64_t *out
+) noexcept {
+    uint64_t shift = 1;
+    uint64_t num = 0;
+
+    for (size_t pos =0; pos < len;) {
+        uint8_t oct = static_cast<const uint8_t *>(in)[pos++];
+
+        num += (oct & 0x7f) * shift;
+
+        if (oct & 0x80) {
+            if (out) {
+                *out = num;
+            }
+
+            return pos;
+        }
+
+        shift <<= 7;
+        num += shift;
+    }
+
+    return 0;
 }
 
 inline int DATABUS::clz(unsigned int x) noexcept {

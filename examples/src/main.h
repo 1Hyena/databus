@@ -1,6 +1,8 @@
 #include "../../databus.h"
 #include <ctime>
 #include <cstdlib>
+#include <charconv>
+#include <array>
 
 inline void log(const char *fmt, ...) noexcept {
     char stackbuf[256];
@@ -72,4 +74,20 @@ inline void log(
     }
 
     log("%s%s%s", prefix, esc, line);
+}
+
+inline void log(DATABUS::ERROR error, const char *line, void *udata) noexcept {
+    std::array<char, 32> prefix{ 'D', 'B', ' ' };
+    const auto res = std::to_chars(
+        prefix.data() + 3, prefix.data() + prefix.size() - 2,
+        reinterpret_cast<uintptr_t>(udata)
+    );
+
+    if (res.ec == std::errc()) {
+        res.ptr[0] = ':';
+        res.ptr[1] = ' ';
+    }
+    else prefix[0] = '\0';
+
+    log(error, line, prefix.data());
 }

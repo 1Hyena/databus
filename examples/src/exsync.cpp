@@ -2,29 +2,24 @@
 #include "main.h"
 #include <chrono>
 #include <thread>
-#include <string>
-#include <array>
 #include <cinttypes>
+#include <span>
+#include <bitset>
+#include <iostream>
 
-static void handle(DATABUS &, DATABUS::ALERT &, size_t);
+static void handle(DATABUS &, DATABUS::ALERT &, std::span<DATABUS> peers);
 
 int main(int argc, char **argv) {
-    std::array<std::string, 2> prefix; // Must be destroyed after the databases.
-    std::array<DATABUS, prefix.size()> databus;
+    std::array<DATABUS, 2> databus;
 
     log("%s", "starting the program");
 
     for (DATABUS &db : databus) {
-        size_t i = static_cast<size_t>(&db - &databus[0]);
-        prefix[i].append("DB ").append(std::to_string(i+1)).append(": ");
+        size_t index = static_cast<size_t>(&db - &databus[0]);
 
-        db.set_logger(
-            [](DATABUS::ERROR error, const char *line, void *udata) noexcept {
-                log(error, line, reinterpret_cast<const char*>(udata));
-            }, const_cast<char *>(prefix[i].c_str())
-        );
-
+        db.set_logger(log, reinterpret_cast<void *>(index));
         db.set_memcap(65536);
+        db.set_matrix(index, databus.size());
 
         if (!db.init()) {
             log("%s", "failed to initialize");
@@ -32,15 +27,17 @@ int main(int argc, char **argv) {
             return EXIT_FAILURE;
         }
 
-        if (i == 0) {
-            for (size_t i=1; i<=10; ++i) {
-                // Let's populate the database with some entries.
+        if (index) {
+            continue;
+        }
 
-                DATABUS::ERROR error = db.set_entry(i, "");
+        for (size_t i=1; i<=10; ++i) {
+            // Let's populate the database with some entries.
 
-                if (error != DATABUS::NO_ERROR) {
-                    log("failed to set entry %lu (%s)", i, db.to_string(error));
-                }
+            DATABUS::ERROR error = db.set_entry(i, "");
+
+            if (error != DATABUS::NO_ERROR) {
+                log("failed to set entry %lu (%s)", i, db.to_string(error));
             }
         }
     }
@@ -48,27 +45,34 @@ int main(int argc, char **argv) {
     DATABUS::ERROR error{};
 
     while (!error) {
+        size_t idle = 0;
+
         for (DATABUS &db : databus) {
-            const size_t i = static_cast<size_t>(&db - &databus[0]);
             error = db.next_error();
 
             if (!error) {
                 DATABUS::ALERT alert;
 
                 while ((alert = db.next_alert()).valid) {
-                    handle(db, alert, i);
+                    handle(db, alert, databus);
                 }
+
+                idle += db.idle();
 
                 continue;
             }
 
-            log("%s", db.to_string(error));
+            log("%s (DB %lu)", db.to_string(error), &db - &databus.front());
             break;
         }
 
-        if (!error) {
+        if (!error && idle == databus.size()) {
             log("tick");
             std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+
+            for (DATABUS &db : databus) {
+                db.kick_start();
+            }
         }
     }
 
@@ -81,7 +85,9 @@ int main(int argc, char **argv) {
     return EXIT_SUCCESS;
 }
 
-void handle(DATABUS &db, DATABUS::ALERT &alert, size_t index) {
+void handle(DATABUS &db, DATABUS::ALERT &alert, std::span<DATABUS> peers) {
+    const size_t index = &db - &peers.front();
+
     switch (alert.event) {
         case DATABUS::SERIALIZE: {
             const char *str = db.get_entry(alert.entry).c_str;
@@ -92,11 +98,45 @@ void handle(DATABUS &db, DATABUS::ALERT &alert, size_t index) {
             db.set_entry(alert.entry, std::to_string(val).c_str());
             break;
         }
+        case DATABUS::SYNCHRONIZE: {
+            const void *outgoing = nullptr;
+            size_t length = db.peek(&outgoing);
+
+            for (DATABUS &peer : peers) {
+                if (&peer == &db) {
+                    continue;
+                }
+
+                length = peer.reserve(length);
+            }
+
+            if (length) {
+                for (DATABUS &peer : peers) {
+                    if (&peer == &db) {
+                        continue;
+                    }
+
+                    const size_t peer_index = &peer - &peers.front();
+                    DATABUS::ERROR error = peer.write(outgoing, length);
+
+                    if (error != DATABUS::NO_ERROR) {
+                        log(
+                            "DB %lu: %s (%s:%d)",
+                            peer_index, db.to_string(error), __FILE__, __LINE__
+                        );
+                    }
+                }
+
+                db.read(nullptr, length);
+            }
+
+            break;
+        }
         default: break;
     }
 
     log(
-        "DB %lu: %s of #%lu: %s", index + 1, db.to_string(alert.event),
+        "DB %lu: %s of #%lu: %s", index, db.to_string(alert.event),
         alert.entry, db.get_entry(alert.entry).c_str
     );
 }
