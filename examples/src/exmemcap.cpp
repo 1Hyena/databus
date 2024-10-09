@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
-#include "main.h"
+#include "../../databus.h"
+#include "../../utils/log.h"
 
 int main(int argc, char **argv) {
     DATABUS databus;

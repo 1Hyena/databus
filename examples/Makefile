@@ -23,7 +23,7 @@ PRINT_FMT  = $(PRINT_FMT1)$(PRINT_FMT2)
 
 $(OUT_FILES): %: $(SRC_DIR)/%.cpp
 	@printf $(PRINT_FMT) $*.cpp "`wc -l $(SRC_DIR)/$*.cpp | cut -f1 -d' '`"
-	$(CC) $< $(C_FLAGS) $(PROF) -o $(OUT_DIR)/$@ $(L_FLAGS)
+	$(CC) $< $(C_FLAGS) $(PROF) -DDATABUS_DEBUG -o $(OUT_DIR)/$@ $(L_FLAGS)
 
 clean:
 	@printf "\033[1;36mCleaning \033[37m ...."

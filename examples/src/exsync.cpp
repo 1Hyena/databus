@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
-#include "main.h"
+#include "../../databus.h"
+#include "../../utils/log.h"
 #include <chrono>
 #include <thread>
 #include <cinttypes>
@@ -31,17 +32,26 @@ int main(int argc, char **argv) {
             continue;
         }
 
-        for (size_t i=1; i<=10; ++i) {
+        std::array graph{
+            5, 5, 6, 6, 7, 7, 0, 0, 8, 8, 9, 9, 10, 10, 1, 1, 3, 3
+        };
+
+        for (size_t i=0; i<graph.size(); ++i) {
             // Let's populate the database with some entries.
 
-            DATABUS::ERROR error = db.set_entry(i, "");
+            DATABUS::ERROR error = db.set_entry(i+1, "");
 
             if (error != DATABUS::NO_ERROR) {
-                log("failed to set entry %lu (%s)", i, db.to_string(error));
+                log("failed to set entry %lu (%s)", i+1, db.to_string(error));
             }
+        }
+
+        for (size_t i=0; i<graph.size(); ++i) {
+            db.set_container(i+1,graph[i]);
         }
     }
 
+    size_t cycle = 1;
     DATABUS::ERROR error{};
 
     while (!error) {
@@ -67,7 +77,7 @@ int main(int argc, char **argv) {
         }
 
         if (!error && idle == databus.size()) {
-            log("tick");
+            log("END OF CYCLE %lu", cycle++);
             std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
             for (DATABUS &db : databus) {
@@ -93,9 +103,12 @@ void handle(DATABUS &db, DATABUS::ALERT &alert, std::span<DATABUS> peers) {
             const char *str = db.get_entry(alert.entry).c_str;
             std::intmax_t val = std::strtoimax(str, nullptr, 10);
 
-            ++val;
+            if (db.next_random() % 2) {
+                ++val;
+            }
 
             db.set_entry(alert.entry, std::to_string(val).c_str());
+
             break;
         }
         case DATABUS::SYNCHRONIZE: {
@@ -107,7 +120,7 @@ void handle(DATABUS &db, DATABUS::ALERT &alert, std::span<DATABUS> peers) {
                     continue;
                 }
 
-                length = peer.reserve(length);
+                length = std::min(length, peer.reserve(length));
             }
 
             if (length) {
@@ -136,7 +149,8 @@ void handle(DATABUS &db, DATABUS::ALERT &alert, std::span<DATABUS> peers) {
     }
 
     log(
-        "DB %lu: %s of #%lu: %s", index, db.to_string(alert.event),
-        alert.entry, db.get_entry(alert.entry).c_str
+        "DB %lu: %s of #%lu/%lu: %s", index, db.to_string(alert.event),
+        db.get_container(alert.entry), alert.entry,
+        db.get_entry(alert.entry).c_str
     );
 }

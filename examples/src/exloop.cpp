@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: MIT
-#include "main.h"
+#include "../../databus.h"
+#include "../../utils/log.h"
 #include <chrono>
 #include <thread>
 
 static void run(DATABUS &);
-static void handle(DATABUS &, DATABUS::ALERT &);
+static void handle(DATABUS &, DATABUS::ALERT &, size_t &cycle);
 
 int main(int argc, char **argv) {
     DATABUS databus;
@@ -45,14 +46,23 @@ void run(DATABUS &db) {
         }
     }
 
+    size_t cycle = 1;
+
     while (!db.next_error()) {
         DATABUS::ALERT alert;
 
         while ((alert = db.next_alert()).valid) {
-            handle(db, alert);
+            handle(db, alert, cycle);
         }
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        if (cycle > 3) {
+            break;
+        }
+
+        if (db.idle()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+            db.kick_start();
+        }
     }
 
     if (db.last_error() != DATABUS::NO_ERROR) {
@@ -60,6 +70,10 @@ void run(DATABUS &db) {
     }
 }
 
-void handle(DATABUS &db, DATABUS::ALERT &alert) {
-    log("%lu: %s", alert.entry, db.to_string(alert.event));
+void handle(DATABUS &db, DATABUS::ALERT &alert, size_t &cycle) {
+    log("#%-2lu: %s", alert.entry, db.to_string(alert.event));
+
+    if (alert.event == DATABUS::FINALIZE) {
+        log("END OF CYCLE %lu", cycle++);
+    }
 }

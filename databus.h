@@ -40,7 +40,7 @@
 
 class DATABUS final {
     public:
-    static constexpr const char *const VERSION = "0.00";
+    static constexpr const char *const VERSION = "0.01";
 
     enum class ERROR : unsigned char {
         NONE = 0,
@@ -94,7 +94,7 @@ class DATABUS final {
 
     struct ALERT {
         size_t entry;
-        EVENT  event;
+        EVENT event;
         bool valid:1;
     };
 
@@ -124,8 +124,11 @@ class DATABUS final {
         size_t index, size_t size,
         const char *file =LEAF(__builtin_FILE()), int line =__builtin_LINE()
     ) noexcept;
+    void set_random(uint64_t) noexcept;
     size_t get_memcap() const noexcept;
     size_t get_memtop() const noexcept;
+    size_t get_index() const noexcept;
+    uint64_t next_random() noexcept;
 
     ERROR next_error() noexcept;
     ERROR last_error() noexcept;
@@ -138,20 +141,33 @@ class DATABUS final {
     size_t reserve(size_t size) noexcept;
     size_t capacity() noexcept;
 
-    ERROR set_entry(size_t id, const void *data, size_t size) noexcept;
-    ERROR set_entry(size_t id, const char *c_str) noexcept;
+    ERROR set_entry(
+        size_t id, const void *data, size_t size,
+        const char *file =LEAF(__builtin_FILE()), int line =__builtin_LINE()
+    ) noexcept;
+    ERROR set_entry(
+        size_t id, const char *c_str,
+        const char *file =LEAF(__builtin_FILE()), int line =__builtin_LINE()
+    ) noexcept;
     ENTRY get_entry(size_t id) const noexcept;
+    ERROR set_container(
+        size_t id, size_t container_id,
+        const char *file =LEAF(__builtin_FILE()), int line =__builtin_LINE()
+    ) noexcept;
+    size_t get_container(size_t id) const noexcept;
 
     static constexpr const size_t BITS_PER_BYTE{
         std::numeric_limits<unsigned char>::digits
     };
+
+    static uint16_t crc16(uint16_t crc, const void *data, size_t size) noexcept;
 
     private:
     struct PACKET {
         enum class TYPE : uint8_t {
             NONE = 0,
             ENTRY,
-            PULSE
+            ETB // End-of-Transmission-Block
         };
 
         size_t size;
@@ -206,7 +222,7 @@ class DATABUS final {
         enum class TYPE : uint8_t {
             NONE = 0,
             // Do not change the order of the types above this line.
-            EVENT_TO_BUS,
+            FLAG_TO_BUS,
             ID_TO_BUS,
             RESOURCE_TO_MEMORY,
             // Do not change the order of the types below this line.
@@ -233,37 +249,59 @@ class DATABUS final {
     };
 
     struct BUS {
+        enum class FLAG : unsigned char {
+            NONE = 0,
+            // Do not change the list above this line.
+            CHANGED,
+            FOREIGN,
+            RELOADING,
+            LOADING,
+            TRANSMIT,
+            RETRANSMIT,
+            RECYCLE,
+            // Do not change the list below this line.
+            MAX_FLAGS
+        };
+
         size_t id;
-        ssize_t event_lookup[ static_cast<size_t>(EVENT::MAX_EVENTS) ];
+        ssize_t flag_lookup[ static_cast<size_t>(FLAG::MAX_FLAGS) ];
         PIPE payload;
+
+        struct POUCH {
+            size_t parent;
+            size_t index;
+            size_t serialized;
+            PIPE contents;
+        } pouch;
+
         uint16_t db;
-        /*
-        PIPE contents;
-        struct CONTAINER {
-            size_t content_id;
-            size_t content_index;
-        } container;
-        */
+
+        struct BITSET {
+            bool serialized:1;
+        } bitset;
     };
+
+    static constexpr const char *to_string(BUS::FLAG) noexcept;
 
     struct QUERY {
         enum class TYPE : uint8_t {
             BUS_BY_ID,
-            BUS_BY_EVENT
+            BUS_BY_FLAG
         };
 
         union {
-            size_t bus_id;
-            EVENT  bus_event;
+            size_t    bus_id;
+            BUS::FLAG bus_flag;
         };
         TYPE type;
     };
 
     static constexpr KEY make_key(uintptr_t) noexcept;
-    static constexpr KEY make_key(EVENT) noexcept;
+    static constexpr KEY make_key(BUS::FLAG) noexcept;
     static constexpr struct BUS make_bus(
         size_t id, PIPE pipe =make_pipe(PIPE::TYPE::C_STR)
     ) noexcept;
+    static constexpr struct BUS::POUCH make_bus_pouch() noexcept;
 
     static constexpr struct ALERT make_alert(
         size_t entry, EVENT type, bool valid =true
@@ -297,7 +335,7 @@ class DATABUS final {
     static constexpr PIPE::ENTRY make_pipe_entry(MEMORY *  ) noexcept;
 
     static constexpr QUERY make_query_by_id(size_t) noexcept;
-    static constexpr QUERY make_query_by_event(EVENT) noexcept;
+    static constexpr QUERY make_query_by_flag(BUS::FLAG) noexcept;
 
     static constexpr uint64_t nbo64(uint64_t) noexcept;
     static constexpr size_t size(PIPE::TYPE) noexcept;
@@ -316,29 +354,42 @@ class DATABUS final {
     ) noexcept;
     static size_t encode(uint64_t, std::array<uint8_t, 10> &) noexcept;
     static size_t decode(const void *, size_t, uint64_t *) noexcept;
+    static uint64_t to_uint64(BUS::BITSET) noexcept;
+    static BUS::BITSET to_bus_bitset(uint64_t) noexcept;
 
     ERROR create_entry(size_t id, const void *data, size_t size) noexcept;
     ERROR update_entry(size_t id, const void *data, size_t size) noexcept;
+    ERROR delete_entry(size_t id) noexcept;
     [[nodiscard]] ERROR capture(const BUS &copy) noexcept;
     void release(BUS *) noexcept;
 
     BUS *find_bus(const QUERY &) const noexcept;
     BUS &get_bus(const QUERY &) const noexcept;
-    const PIPE *find_buses(EVENT) const noexcept;
+    const PIPE *find_buses(BUS::FLAG) const noexcept;
+    BUS *find_container(BUS &, BUS::FLAG) const noexcept;
+    BUS *find_container(BUS &) const noexcept;
 
-    void set_event(BUS &, EVENT, bool val =true) noexcept;
-    void rem_event(BUS &, EVENT) noexcept;
-    [[nodiscard]] bool has_event(const BUS &, EVENT) const noexcept;
+    void set_flag(
+        BUS &, BUS::FLAG, bool val =true,
+        const char *file =LEAF(__builtin_FILE()), int line =__builtin_LINE()
+    ) noexcept;
+    void rem_flag(
+        BUS &, BUS::FLAG,
+        const char *file =LEAF(__builtin_FILE()), int line =__builtin_LINE()
+    ) noexcept;
+    [[nodiscard]] bool has_flag(const BUS &, BUS::FLAG) const noexcept;
+    [[nodiscard]] decltype(BUS::db) domain(const BUS &) const noexcept;
+    [[nodiscard]] ERROR transfer(BUS &, BUS *) noexcept;
 
     ERROR transmit(
         std::initializer_list<uint64_t> headers,
         const void *data =nullptr, size_t size =0
     ) noexcept;
     ERROR transmit(const BUS &) noexcept;
-    ERROR transmit_pulse() noexcept;
+    ERROR transmit_etb() noexcept;
     ERROR receive() noexcept;
     ERROR receive_entry(const uint8_t *data, size_t len) noexcept;
-    ERROR receive_pulse(const uint8_t *data, size_t len) noexcept;
+    ERROR receive_etb(const uint8_t *data, size_t len) noexcept;
 
     size_t count(INDEX::TYPE, KEY key) const noexcept;
     INDEX::ENTRY find(
@@ -380,12 +431,13 @@ class DATABUS final {
     int       to_int   (PIPE::ENTRY) const noexcept;
     uint64_t  to_uint64(PIPE::ENTRY) const noexcept;
 
-    int      *to_int   (const PIPE &) const noexcept;
-    char     *to_char  (const PIPE &) const noexcept;
-    uint8_t  *to_uint8 (const PIPE &) const noexcept;
-    uint64_t *to_uint64(const PIPE &) const noexcept;
-    KEY      *to_key   (const PIPE &) const noexcept;
-    void    **to_ptr   (const PIPE &) const noexcept;
+    int      *to_int    (const PIPE &) const noexcept;
+    char     *to_char   (const PIPE &) const noexcept;
+    uint8_t  *to_uint8  (const PIPE &) const noexcept;
+    uint64_t *to_uint64 (const PIPE &) const noexcept;
+    KEY      *to_key    (const PIPE &) const noexcept;
+    void    **to_ptr    (const PIPE &) const noexcept;
+    BUS     **to_bus_ptr(const PIPE &) const noexcept;
 
     void *to_ptr(PIPE::ENTRY &) const noexcept;
     void *to_ptr(PIPE &, size_t index) const noexcept;
@@ -484,15 +536,17 @@ class DATABUS final {
         enum class STATE : uint8_t {
             NONE = 0,
             SERIALIZING,
+            TRANSMITTING,
             SYNCHRONIZING,
             DESERIALIZING,
             FINALIZING
         };
 
-        size_t index;
         size_t nodes;
+        size_t peers;
         size_t buses;
-        size_t pulse;
+        size_t etb;
+        decltype(BUS::db) index;
         STATE  state;
     } machine;
 
@@ -504,10 +558,12 @@ class DATABUS final {
 
     struct BITSET {
         bool alerted:1;
+        bool waiting:1;
         bool synched:1;
         bool reindex:1;
     } bitset;
 
+    uint64_t random;
     sigset_t sigset_all;
     sigset_t sigset_none;
 
@@ -527,7 +583,8 @@ inline DATABUS::DATABUS() noexcept :
     log_callback(nullptr), log_userdata_callback(nullptr),
     log_userdata(nullptr), indices{}, mempool{make_mempool()},
     machine{make_machine()}, incoming{}, outgoing{}, errored{},
-    bitset{}, sigset_all{}, sigset_none{}, fuses{} {
+    bitset{}, random{reinterpret_cast<uintptr_t>(this)},
+    sigset_all{}, sigset_none{}, fuses{} {
 }
 
 inline DATABUS::~DATABUS() {
@@ -587,11 +644,13 @@ inline void DATABUS::clear() noexcept {
     mempool.usage = sizeof(DATABUS);
     mempool.top = mempool.usage;
 
-    size_t machine_index = machine.index;
-    size_t machine_nodes = machine.nodes;
+    const auto machine_index = machine.index;
+    const auto machine_nodes = machine.nodes;
+    const auto machine_peers = machine.peers;
     machine = make_machine();
     machine.index = machine_index;
     machine.nodes = machine_nodes;
+    machine.peers = machine_peers;
 
     bitset = {};
 
@@ -630,8 +689,8 @@ inline bool DATABUS::init() noexcept {
                 index.autogrow = true;
                 break;
             }
-            case INDEX::TYPE::EVENT_TO_BUS: {
-                index.buckets = static_cast<size_t>(EVENT::MAX_EVENTS);
+            case INDEX::TYPE::FLAG_TO_BUS: {
+                index.buckets = static_cast<size_t>(BUS::FLAG::MAX_FLAGS);
                 index.multimap = true;
                 index.autogrow = false;
                 break;
@@ -640,7 +699,7 @@ inline bool DATABUS::init() noexcept {
 
         switch (index.type) {
             case INDEX::TYPE::NONE: continue;
-            case INDEX::TYPE::EVENT_TO_BUS:
+            case INDEX::TYPE::FLAG_TO_BUS:
             case INDEX::TYPE::ID_TO_BUS:
             case INDEX::TYPE::RESOURCE_TO_MEMORY: {
                 index.table = allocate_tables(index.buckets);
@@ -671,7 +730,7 @@ inline bool DATABUS::init() noexcept {
                     val_pipe.type = PIPE::TYPE::MEMORY_PTR;
                     break;
                 }
-                case INDEX::TYPE::EVENT_TO_BUS: {
+                case INDEX::TYPE::FLAG_TO_BUS: {
                     val_pipe.type = PIPE::TYPE::BUS_PTR;
                     break;
                 }
@@ -738,12 +797,17 @@ inline void DATABUS::set_matrix(
         log("%s: invalid parameters (%s:%d)", __FUNCTION__, file, line);
     }
 
-    if (index > std::numeric_limits<decltype(BUS::db)>::max()) {
+    if (index > std::numeric_limits<decltype(MACHINE::index)>::max()) {
         log("%s: index too large (%s:%d)", __FUNCTION__, file, line);
     }
 
-    machine.index = index;
+    machine.index = static_cast<decltype(MACHINE::index)>(index);
     machine.nodes = size;
+    machine.peers = size - 1;
+}
+
+inline void DATABUS::set_random(uint64_t seed) noexcept {
+    random = seed;
 }
 
 inline size_t DATABUS::get_memcap() const noexcept {
@@ -752,6 +816,10 @@ inline size_t DATABUS::get_memcap() const noexcept {
 
 inline size_t DATABUS::get_memtop() const noexcept {
     return mempool.top;
+}
+
+inline size_t DATABUS::get_index() const noexcept {
+    return machine.index;
 }
 
 inline DATABUS::ERROR DATABUS::err(ERROR e) noexcept {
@@ -801,9 +869,11 @@ inline DATABUS::ERROR DATABUS::next_error() noexcept {
         return err(ERROR::OUT_OF_MEMORY);
     }
 
+    Again:
+
     switch (machine.state) {
         case MACHINE::STATE::SERIALIZING: {
-            if (find_bus(make_query_by_event(EVENT::SERIALIZE))) {
+            if (find_bus(make_query_by_flag(BUS::FLAG::LOADING))) {
                 if (!bitset.alerted) {
                     bitset.alerted = true;
 
@@ -816,33 +886,126 @@ inline DATABUS::ERROR DATABUS::next_error() noexcept {
                 );
             }
 
+            machine.state = MACHINE::STATE::TRANSMITTING;
+
+            [[fallthrough]];
+        }
+        case MACHINE::STATE::TRANSMITTING: {
             BUS *bus;
 
-            while ((bus = find_bus(make_query_by_event(EVENT::SYNCHRONIZE)))) {
+            while ((bus = find_bus(make_query_by_flag(BUS::FLAG::TRANSMIT)))) {
+                rem_flag(*bus, BUS::FLAG::TRANSMIT);
+
+                if (bus->pouch.parent) {
+                    BUS &container = get_bus(
+                        make_query_by_id(bus->pouch.parent)
+                    );
+
+                    if (container.db == machine.index
+                    && !has_flag(container, BUS::FLAG::RECYCLE)) {
+                        // Let's postpone transmission because the given entry
+                        // could still be changed during the serialization of
+                        // its container.
+
+                        continue;
+                    }
+
+                    if (find_container(*bus, BUS::FLAG::TRANSMIT)) {
+                        // Let's postpone transmission because the given entry
+                        // has a container that may also be transmitted. The
+                        // transmission of the container has a higher priority.
+
+                        set_flag(*bus, BUS::FLAG::RETRANSMIT);
+
+                        continue;
+                    }
+                }
+
+                const PIPE &contents = bus->pouch.contents;
+
+                if (contents.size) {
+                    BUS **const content_array = to_bus_ptr(contents);
+
+                    if (content_array) {
+                        for (size_t i=0, sz=contents.size; i<sz; ++i) {
+                            BUS *content = content_array[i];
+
+                            if (has_flag(*content, BUS::FLAG::CHANGED)
+                            && !has_flag(*content, BUS::FLAG::RETRANSMIT)) {
+                                set_flag(*content, BUS::FLAG::TRANSMIT);
+                            }
+                        }
+                    }
+                }
+
+                if (!has_flag(*bus, BUS::FLAG::CHANGED)) {
+                    BUS *container = find_container(*bus);
+
+                    if (!container
+                    || container->bitset.serialized
+                    || container->db == machine.index) {
+                        // If this database entry has not been changed and we
+                        // can safely assume that our peers are not waiting for
+                        // us to explicitly declare this entry as serialized,
+                        // then we do not transmit it.
+
+                        continue;
+                    }
+                }
+
+                const auto prev_owner = bus->db;
+                const uint64_t next_owner = next_random() % machine.nodes;
+
+                bus->db = static_cast<decltype(BUS::db)>(next_owner);
                 ERROR error = transmit(*bus);
 
                 if (!error) {
-                    rem_event(*bus, EVENT::SYNCHRONIZE);
+                    rem_flag(*bus, BUS::FLAG::CHANGED);
                 }
                 else {
+                    bus->db = prev_owner;
+
                     return err(error);
                 }
             }
 
-            ERROR error = transmit_pulse();
+            for (;;) {
+                bus = find_bus(make_query_by_flag(BUS::FLAG::RETRANSMIT));
 
-            if (!error) {
-                machine.state = MACHINE::STATE::SYNCHRONIZING;
+                if (!bus) {
+                    break;
+                }
 
-                break;
+                rem_flag(*bus, BUS::FLAG::RETRANSMIT);
+                set_flag(*bus, BUS::FLAG::TRANSMIT);
             }
 
-            return err(error);
+            if (find_bus(make_query_by_flag(BUS::FLAG::TRANSMIT))) {
+                goto Again;
+            }
+
+            ERROR error = NO_ERROR;
+
+            if (!find_bus(make_query_by_flag(BUS::FLAG::RELOADING))) {
+                error = transmit_etb();
+            }
+
+            if (error != NO_ERROR) {
+                return err(error);
+            }
+
+            machine.state = MACHINE::STATE::SYNCHRONIZING;
+
+            [[fallthrough]];
         }
         case MACHINE::STATE::SYNCHRONIZING: {
-            bitset.synched = false;
+            if (!bitset.waiting) {
+                bitset.synched = false;
+            }
 
-            if (machine.pulse < machine.nodes && incoming.size) {
+            const size_t old_etb = machine.etb;
+
+            if (machine.etb < machine.peers && incoming.size) {
                 ERROR error = receive();
 
                 if (error != NO_ERROR) {
@@ -850,13 +1013,28 @@ inline DATABUS::ERROR DATABUS::next_error() noexcept {
                 }
             }
 
-            if (outgoing.size || machine.pulse < machine.nodes) {
+            if (find_bus(make_query_by_flag(BUS::FLAG::LOADING))) {
+                machine.state = MACHINE::STATE::SERIALIZING;
+
+                goto Again;
+            }
+
+            if (outgoing.size || machine.etb < machine.peers) {
+                if (old_etb == machine.etb) {
+                    bitset.waiting = true;
+                }
+
                 return ERROR::NONE;
+            }
+
+            if (find_bus(make_query_by_flag(BUS::FLAG::RELOADING))) {
+                log("#%lu is still reloading!", find_bus(make_query_by_flag(BUS::FLAG::RELOADING))->id);
+                die();
             }
 
             machine.state = MACHINE::STATE::DESERIALIZING;
 
-            break;
+            [[fallthrough]];
         }
         case MACHINE::STATE::DESERIALIZING: {
             if (bitset.reindex) {
@@ -867,31 +1045,45 @@ inline DATABUS::ERROR DATABUS::next_error() noexcept {
                 }
             }
 
-            if (!find_bus(make_query_by_event(EVENT::DESERIALIZE))) {
-                machine.state = MACHINE::STATE::FINALIZING;
-                break;
+            if (find_bus(make_query_by_flag(BUS::FLAG::FOREIGN))) {
+                if (!bitset.alerted) {
+                    bitset.alerted = true;
+
+                    return ERROR::NONE;
+                }
+
+                return report(
+                    ERROR::PENDING_ALERT,
+                    "%s", "cannot proceed if there are unhandled events"
+                );
             }
 
-            if (!bitset.alerted) {
-                bitset.alerted = true;
+            machine.state = MACHINE::STATE::FINALIZING;
 
-                return ERROR::NONE;
-            }
-
-            return report(
-                ERROR::PENDING_ALERT,
-                "%s", "cannot proceed if there are unhandled events"
-            );
+            [[fallthrough]];
         }
         case MACHINE::STATE::FINALIZING: {
             BUS *bus;
 
-            while ( (bus = find_bus(make_query_by_event(EVENT::FINALIZE))) ) {
-                rem_event(*bus, EVENT::FINALIZE);
-                set_event(*bus, EVENT::SERIALIZE);
+            while ( (bus = find_bus(make_query_by_flag(BUS::FLAG::RECYCLE))) ) {
+                rem_flag(*bus, BUS::FLAG::RECYCLE);
+
+                if (bus->db == machine.index) {
+                    set_flag(*bus, BUS::FLAG::LOADING);
+                }
+
+                BUS *container = find_container(*bus);
+
+                if (container) {
+                    if (bus->bitset.serialized) {
+                        --container->pouch.serialized;
+                    }
+                }
+
+                bus->bitset.serialized = false;
             }
 
-            machine.pulse = 1;
+            machine.etb = 0;
 
             break;
         }
@@ -906,11 +1098,45 @@ inline DATABUS::ALERT DATABUS::next_alert() noexcept {
 
     switch (machine.state) {
         case MACHINE::STATE::SERIALIZING: {
-            BUS *const bus = find_bus(make_query_by_event(EVENT::SERIALIZE));
+            for (;;) {
+                BUS *const bus{
+                    find_bus(make_query_by_flag(BUS::FLAG::LOADING))
+                };
 
-            if (bus) {
-                rem_event(*bus, EVENT::SERIALIZE);
-                set_event(*bus, EVENT::FINALIZE);
+                if (!bus) {
+                    break;
+                }
+
+                if (bus->bitset.serialized) {
+                    die();
+                }
+
+                rem_flag(*bus, BUS::FLAG::LOADING);
+
+                if (bus->pouch.serialized < bus->pouch.contents.size) {
+                    set_flag(*bus, BUS::FLAG::RELOADING);
+
+                    continue;
+                }
+
+                set_flag(*bus, BUS::FLAG::RECYCLE);
+                set_flag(*bus, BUS::FLAG::TRANSMIT);
+
+                if (bus->pouch.parent) {
+                    BUS &container = get_bus(
+                        make_query_by_id(bus->pouch.parent)
+                    );
+
+                    BUS::POUCH &pouch = container.pouch;
+
+                    if (++pouch.serialized == pouch.contents.size
+                    &&  has_flag(container, BUS::FLAG::RELOADING)) {
+                        rem_flag(container, BUS::FLAG::RELOADING);
+                        set_flag(container, BUS::FLAG::LOADING);
+                    }
+                }
+
+                bus->bitset.serialized = true;
 
                 return make_alert(bus->id, EVENT::SERIALIZE);
             }
@@ -918,7 +1144,7 @@ inline DATABUS::ALERT DATABUS::next_alert() noexcept {
             break;
         }
         case MACHINE::STATE::SYNCHRONIZING: {
-            if (outgoing.size && !bitset.synched) {
+            if (!bitset.synched) {
                 bitset.synched = true;
 
                 return make_alert(0, EVENT::SYNCHRONIZE);
@@ -927,11 +1153,21 @@ inline DATABUS::ALERT DATABUS::next_alert() noexcept {
             break;
         }
         case MACHINE::STATE::DESERIALIZING: {
-            BUS *const bus = find_bus(make_query_by_event(EVENT::DESERIALIZE));
+            BUS *const bus = find_bus(make_query_by_flag(BUS::FLAG::FOREIGN));
 
             if (bus) {
-                rem_event(*bus, EVENT::DESERIALIZE);
+                rem_flag(*bus, BUS::FLAG::FOREIGN);
+
                 return make_alert(bus->id, EVENT::DESERIALIZE);
+            }
+
+            break;
+        }
+        case MACHINE::STATE::FINALIZING: {
+            if (machine.etb == 0 && !bitset.waiting) {
+                bitset.waiting = true;
+
+                return make_alert(0, EVENT::FINALIZE);
             }
 
             break;
@@ -945,12 +1181,18 @@ inline DATABUS::ALERT DATABUS::next_alert() noexcept {
 }
 
 inline bool DATABUS::idle() const noexcept {
-    return machine.state == MACHINE::STATE::FINALIZING && machine.pulse == 1;
+    return bitset.waiting;;
 }
 
 inline void DATABUS::kick_start() noexcept {
     if (idle()) {
-        machine.state = MACHINE::STATE::SERIALIZING;
+        if (machine.state == MACHINE::STATE::FINALIZING) {
+            machine.state = MACHINE::STATE::SERIALIZING;
+            bitset.waiting = false;
+        }
+        else if (machine.state == MACHINE::STATE::SYNCHRONIZING) {
+            bitset.waiting = false;
+        }
     }
 }
 
@@ -974,6 +1216,7 @@ inline size_t DATABUS::read(void *buf, size_t count) noexcept {
     }
 
     outgoing.size -= count;
+    bitset.waiting = false;
 
     return count;
 }
@@ -1005,9 +1248,12 @@ inline DATABUS::ERROR DATABUS::write(const void *buf, size_t count) noexcept {
                 ) : error
             );
         }
-        else {
-            return error;
+
+        if (!error) {
+            bitset.waiting = false;
         }
+
+        return error;
     }
 
     return ERROR::NONE;
@@ -1024,11 +1270,17 @@ inline size_t DATABUS::reserve(size_t count) noexcept {
         }
     }
 
-    return std::min(count, capacity());
+    return capacity();
 }
 
 inline size_t DATABUS::capacity() noexcept {
     return incoming.capacity - incoming.size;
+}
+
+uint64_t DATABUS::next_random() noexcept {
+    return (
+        random = (164603309694725029ull * random) % 14738995463583502973ull
+    );
 }
 
 inline DATABUS::ERROR DATABUS::create_entry(
@@ -1040,9 +1292,7 @@ inline DATABUS::ERROR DATABUS::create_entry(
 
     ERROR error = NO_ERROR;
 
-    BUS *bus = find_bus(make_query_by_id(id));
-
-    if (bus) {
+    if (find_bus(make_query_by_id(id))) {
         return fuse() ? report_bad_request() : ERROR::BAD_REQUEST;
     }
 
@@ -1053,10 +1303,7 @@ inline DATABUS::ERROR DATABUS::create_entry(
     error = capture(copy_from);
 
     if (!error) {
-        bus = &get_bus(make_query_by_id(id));
-
-        set_event(*bus, EVENT::SERIALIZE);
-        set_event(*bus, EVENT::SYNCHRONIZE);
+        get_bus(make_query_by_id(id)).db = machine.index;
     }
 
     return error;
@@ -1082,33 +1329,297 @@ inline DATABUS::ERROR DATABUS::update_entry(
         return fuse() ? report_bad_request() : ERROR::BAD_REQUEST;
     }
 
-    if (!error) {
-        set_event(*bus, EVENT::SYNCHRONIZE);
+    return error;
+}
+
+inline DATABUS::ERROR DATABUS::delete_entry(size_t id) noexcept {
+    if (id == 0) {
+        return fuse() ? report_bad_request() : ERROR::BAD_REQUEST;
+    }
+
+    ERROR error = NO_ERROR;
+
+    BUS *bus = find_bus(make_query_by_id(id));
+
+    if (bus) {
+        error = transfer(*bus, nullptr);
+
+        if (!error) {
+            const PIPE &contents = bus->pouch.contents;
+
+            while (contents.size) {
+                error = delete_entry(to_bus(get_last(contents))->id);
+
+                if (error != NO_ERROR) {
+                    die();
+                }
+            }
+
+            release(bus);
+        }
+    }
+    else {
+        return fuse() ? report_bad_request() : ERROR::BAD_REQUEST;
     }
 
     return error;
 }
 
 inline DATABUS::ERROR DATABUS::set_entry(
-    size_t id, const void *data, size_t size
+    size_t id, const void *data, size_t size, const char *file, int line
 ) noexcept {
     if (id == 0) {
-        return fuse() ? report_bad_request() : ERROR::BAD_REQUEST;
+        return (
+            fuse() ? (
+                report_bad_request("cannot set ID zero", file, line)
+            ) : ERROR::BAD_REQUEST
+        );
     }
 
     if (machine.state != MACHINE::STATE::SERIALIZING) {
-        return fuse() ? report_bad_request() : ERROR::BAD_REQUEST;
+        return (
+            fuse() ? (
+                report_bad_request("cannot set unless serializing", file, line)
+            ) : ERROR::BAD_REQUEST
+        );
     }
 
     BUS *bus = find_bus(make_query_by_id(id));
 
-    return bus ? update_entry(id, data, size) : create_entry(id, data, size);
+    if (bus) {
+        if (domain(*bus) != machine.index) {
+            return (
+                fuse() ? (
+                    report_bad_request("cannot set a foreign entry", file, line)
+                ) : ERROR::BAD_REQUEST
+            );
+        }
+
+        if (bus->pouch.serialized < bus->pouch.contents.size) {
+            return (
+                fuse() ? (
+                    report_bad_request(
+                        "cannot set incomplete entry", file, line
+                    )
+                ) : ERROR::BAD_REQUEST
+            );
+        }
+    }
+
+    ERROR error = NO_ERROR;
+
+    if (bus) {
+        const bool changed{
+            bus->payload.size != size ||
+            std::memcmp(to_char(bus->payload), data, size)
+        };
+
+        error = update_entry(id, data, size);
+
+        if (!error) {
+            if (changed) {
+                set_flag(*bus, BUS::FLAG::CHANGED);
+                set_flag(*bus, BUS::FLAG::TRANSMIT);
+            }
+
+            return NO_ERROR;
+        }
+    }
+    else {
+        error = create_entry(id, data, size);
+
+        if (!error) {
+            bus = &get_bus(make_query_by_id(id));
+            set_flag(*bus, BUS::FLAG::LOADING);
+            set_flag(*bus, BUS::FLAG::CHANGED);
+        }
+    }
+
+    return error;
 }
 
 inline DATABUS::ERROR DATABUS::set_entry(
-    size_t id, const char *data
+    size_t id, const char *data, const char *file, int line
 ) noexcept {
-    return set_entry(id, data, std::strlen(data));
+    return set_entry(id, data, std::strlen(data), file, line);
+}
+
+inline DATABUS::ERROR DATABUS::transfer(BUS &bus, BUS *container) noexcept {
+    BUS *old_container = nullptr;
+
+    if (bus.pouch.parent) {
+        old_container = find_bus(make_query_by_id(bus.pouch.parent));
+
+        if (!old_container) {
+            die();
+        }
+    }
+
+    size_t old_index = bus.pouch.index;
+
+    if (container) {
+        if (container == old_container) {
+            return NO_ERROR;
+        }
+
+        size_t new_index = container->pouch.contents.size;
+
+        ERROR error{
+            insert(container->pouch.contents, make_pipe_entry(&bus))
+        };
+
+        if (error == ERROR::NONE) {
+            bus.pouch.parent = container->id;
+            bus.pouch.index  = new_index;
+
+            if (bus.bitset.serialized) {
+                ++container->pouch.serialized;
+            }
+        }
+        else return error;
+    }
+
+    if (old_container) {
+        erase(old_container->pouch.contents, old_index);
+
+        if (old_container->pouch.contents.size > old_index) {
+            BUS *other = to_bus(
+                get_entry(old_container->pouch.contents, old_index)
+            );
+
+            if (!other) die();
+
+            other->pouch.index = old_index;
+        }
+
+        if (bus.bitset.serialized) {
+            --old_container->pouch.serialized;
+        }
+
+        bus.pouch.index = 0;
+        bus.pouch.parent = 0;
+    }
+
+    return NO_ERROR;
+}
+
+inline DATABUS::ERROR DATABUS::set_container(
+    size_t id, size_t container_id, const char *file, int line
+) noexcept {
+    if (machine.state != MACHINE::STATE::SERIALIZING) {
+        return (
+            fuse() ? (
+                report_bad_request(
+                    "cannot set container unless serializing", file, line
+                )
+            ) : ERROR::BAD_REQUEST
+        );
+    }
+
+    BUS *bus = find_bus(make_query_by_id(id));
+
+    if (!bus) {
+        return (
+            fuse() ? (
+                report_bad_request("cannot nest non-existent entry", file, line)
+            ) : ERROR::BAD_REQUEST
+        );
+    }
+
+    if (bus && domain(*bus) != machine.index) {
+        return (
+            fuse() ? (
+                report_bad_request(
+                    "cannot transfer a foreign entry", file, line
+                )
+            ) : ERROR::BAD_REQUEST
+        );
+    }
+
+    BUS *new_container = find_bus(make_query_by_id(container_id));
+
+    if (container_id && !new_container) {
+        return (
+            fuse() ? (
+                report_bad_request(
+                    "cannot transfer entry into a non-existent entry",
+                    file, line
+                )
+            ) : ERROR::BAD_REQUEST
+        );
+    }
+
+    if (new_container && domain(*new_container) != machine.index) {
+        return (
+            fuse() ? (
+                report_bad_request(
+                    "cannot transfer entry into a foreign entry", file, line
+                )
+            ) : ERROR::BAD_REQUEST
+        );
+    }
+
+    BUS *old_container = nullptr;
+
+    if (bus->pouch.parent) {
+        old_container = find_bus(make_query_by_id(bus->pouch.parent));
+
+        if (!old_container) {
+            return (
+                fuse() ? (
+                    report_bad_request("unexpectedly missing nest", file, line)
+                ) : ERROR::BAD_REQUEST
+            );
+        }
+
+        if (domain(*old_container) != machine.index) {
+            return (
+                fuse() ? (
+                    report_bad_request(
+                        "cannot remove entry from a foreign container",
+                        file, line
+                    )
+                ) : ERROR::BAD_REQUEST
+            );
+        }
+    }
+
+    if (new_container) {
+        for (size_t nest_id = new_container->id; nest_id;) {
+            if (nest_id == id) {
+                return (
+                    fuse() ? (
+                        report_bad_request(
+                            "cannot insert entry into itself", file, line
+                        )
+                    ) : ERROR::BAD_REQUEST
+                );
+            }
+
+            nest_id = get_bus(make_query_by_id(nest_id)).pouch.parent;
+        }
+    }
+
+    if (new_container == old_container) {
+        return NO_ERROR;
+    }
+
+    ERROR error = transfer(*bus, new_container);
+
+    if (!error) {
+        if (new_container != old_container) {
+            set_flag(*bus, BUS::FLAG::CHANGED);
+            set_flag(*bus, BUS::FLAG::TRANSMIT);
+        }
+    }
+
+    return error;
+}
+
+inline size_t DATABUS::get_container(size_t id) const noexcept {
+    const BUS *bus = find_bus(make_query_by_id(id));
+
+    return bus ? bus->pouch.parent : 0;
 }
 
 inline DATABUS::ENTRY DATABUS::get_entry(size_t id) const noexcept {
@@ -1119,6 +1630,19 @@ inline DATABUS::ENTRY DATABUS::get_entry(size_t id) const noexcept {
     }
 
     return make_entry(bus->id, bus->payload.size, bus->payload.data);
+}
+
+inline decltype(DATABUS::BUS::db) DATABUS::domain(
+    const BUS &bus
+) const noexcept {
+    if (!bus.pouch.parent
+    || has_flag(bus, BUS::FLAG::LOADING)
+    || has_flag(bus, BUS::FLAG::RELOADING)
+    || has_flag(bus, BUS::FLAG::TRANSMIT)) {
+        return bus.db;
+    }
+
+    return domain(get_bus(make_query_by_id(bus.pouch.parent)));
 }
 
 inline const DATABUS::RESULT &DATABUS::report(const RESULT &result) noexcept {
@@ -1234,7 +1758,7 @@ inline DATABUS::ERROR DATABUS::report(
             }
             else {
                 if (::write(STDERR_FILENO, bufptr, strlen(bufptr)) > 0) {
-                    ::write(STDERR_FILENO, "\n", 1);
+                    (void)!::write(STDERR_FILENO, "\n", 1);
                 }
             }
 
@@ -1256,7 +1780,7 @@ inline DATABUS::ERROR DATABUS::report(
                 }
                 else {
                     if (::write(STDERR_FILENO, OOM, strlen(OOM)) > 0) {
-                        ::write(STDERR_FILENO, "\n", 1);
+                        (void)!::write(STDERR_FILENO, "\n", 1);
                     }
                 }
             }
@@ -1270,7 +1794,7 @@ inline DATABUS::ERROR DATABUS::report(
             }
             else {
                 if (::write(STDERR_FILENO, bufptr, strlen(bufptr)) > 0) {
-                    ::write(STDERR_FILENO, "\n", 1);
+                    (void)!::write(STDERR_FILENO, "\n", 1);
                 }
             }
 
@@ -1294,11 +1818,11 @@ inline DATABUS::ERROR DATABUS::capture(const BUS &copy) noexcept {
         return fuse() ? report_bug() : ERROR::LIBRARY;
     }
 
-    for (auto &ev : copy.event_lookup) {
+    for (auto &ev : copy.flag_lookup) {
         ERROR error{
             reserve(
-                INDEX::TYPE::EVENT_TO_BUS,
-                make_key(static_cast<EVENT>(&ev - &(copy.event_lookup[0]))),
+                INDEX::TYPE::FLAG_TO_BUS,
+                make_key(static_cast<BUS::FLAG>(&ev - &(copy.flag_lookup[0]))),
                 machine.buses + 1
             )
         };
@@ -1361,11 +1885,25 @@ inline void DATABUS::release(BUS *bus) noexcept {
         return;
     }
 
-    for (auto &ev : bus->event_lookup) {
-        rem_event(*bus, static_cast<EVENT>(&ev - &(bus->event_lookup[0])));
+    if (transfer(*bus, nullptr) != NO_ERROR) {
+        die();
+    }
+
+    while (bus->pouch.contents.size) {
+        PIPE::ENTRY entry{get_last(bus->pouch.contents)};
+        BUS *content = to_bus(entry);
+
+        if (transfer(*content, nullptr) != NO_ERROR) {
+            die();
+        }
+    }
+
+    for (auto &ev : bus->flag_lookup) {
+        rem_flag(*bus, static_cast<BUS::FLAG>(&ev - &(bus->flag_lookup[0])));
     }
 
     destroy(bus->payload);
+    destroy(bus->pouch.contents);
 
     if (erase(INDEX::TYPE::ID_TO_BUS, make_key(bus->id))) {
         --machine.buses;
@@ -1385,9 +1923,9 @@ inline DATABUS::BUS *DATABUS::find_bus(const QUERY &query) const noexcept {
 
             break;
         }
-        case QUERY::TYPE::BUS_BY_EVENT: {
+        case QUERY::TYPE::BUS_BY_FLAG: {
             entry = find(
-                INDEX::TYPE::EVENT_TO_BUS, make_key(query.bus_event)
+                INDEX::TYPE::FLAG_TO_BUS, make_key(query.bus_flag)
             );
 
             break;
@@ -1409,14 +1947,43 @@ inline DATABUS::BUS &DATABUS::get_bus(const QUERY &query) const noexcept {
     return *bus;
 }
 
-inline const DATABUS::PIPE *DATABUS::find_buses(EVENT ev) const noexcept {
-    INDEX::ENTRY entry{find(INDEX::TYPE::EVENT_TO_BUS, make_key(ev))};
+inline const DATABUS::PIPE *DATABUS::find_buses(BUS::FLAG flg) const noexcept {
+    INDEX::ENTRY entry{find(INDEX::TYPE::FLAG_TO_BUS, make_key(flg))};
 
     if (entry.valid) {
         return entry.val_pipe;
     }
 
     return nullptr;
+}
+
+inline DATABUS::BUS *DATABUS::find_container(
+    BUS &bus, BUS::FLAG flag
+) const noexcept {
+    BUS *container = &bus;
+
+    do {
+        container = (
+            container->pouch.parent ? find_bus(
+                make_query_by_id(container->pouch.parent)
+            ) : nullptr
+        );
+
+        if (container && has_flag(*container, flag)) {
+            return container;
+        }
+    }
+    while (container);
+
+    return nullptr;
+}
+
+inline DATABUS::BUS *DATABUS::find_container(BUS &bus) const noexcept {
+    return (
+        bus.pouch.parent ? find_bus(
+            make_query_by_id(bus.pouch.parent)
+        ) : nullptr
+    );
 }
 
 inline DATABUS::INDEX &DATABUS::get_index(INDEX::TYPE index_type) noexcept {
@@ -1475,6 +2042,12 @@ inline DATABUS::KEY *DATABUS::to_key(const PIPE &pipe) const noexcept {
     return static_cast<KEY *>(pipe.data);
 }
 
+inline DATABUS::BUS **DATABUS::to_bus_ptr(const PIPE &pipe) const noexcept {
+    if (pipe.type != PIPE::TYPE::BUS_PTR) die();
+
+    return static_cast<BUS **>(pipe.data);
+}
+
 inline void **DATABUS::to_ptr(const PIPE &pipe) const noexcept {
     switch (pipe.type) {
         case PIPE::TYPE::PTR:
@@ -1530,19 +2103,21 @@ inline const void *DATABUS::to_ptr(
     return to_ptr(const_cast<PIPE&>(pipe), index);
 }
 
-inline void DATABUS::set_event(BUS &bus, EVENT event, bool value) noexcept {
+inline void DATABUS::set_flag(
+    BUS &bus, BUS::FLAG flag, bool value, const char *file, int line
+) noexcept {
     if (value == false) {
-        rem_event(bus, event);
+        rem_flag(bus, flag);
         return;
     }
 
-    size_t index = static_cast<size_t>(event);
+    size_t index = static_cast<size_t>(flag);
 
-    if (index >= std::extent<decltype(bus.event_lookup)>::value) {
+    if (index >= std::extent<decltype(bus.flag_lookup)>::value) {
         return die();
     }
 
-    ssize_t pos = bus.event_lookup[index];
+    ssize_t pos = bus.flag_lookup[index];
 
     if (pos >= 0) {
         return; // Already set.
@@ -1550,8 +2125,8 @@ inline void DATABUS::set_event(BUS &bus, EVENT event, bool value) noexcept {
 
     INDEX::ENTRY entry{
         insert(
-            INDEX::TYPE::EVENT_TO_BUS,
-            make_key(event), make_pipe_entry(&bus)
+            INDEX::TYPE::FLAG_TO_BUS,
+            make_key(flag), make_pipe_entry(&bus)
         )
     };
 
@@ -1561,7 +2136,9 @@ inline void DATABUS::set_event(BUS &bus, EVENT event, bool value) noexcept {
             return die();
         }
 
-        bus.event_lookup[index] = static_cast<ssize_t>(entry.index);
+        bus.flag_lookup[index] = static_cast<ssize_t>(entry.index);
+
+        //log("set #%lu: %s (%s:%d)", bus.id, to_string(flag), file, line);
 
         return;
     }
@@ -1570,22 +2147,24 @@ inline void DATABUS::set_event(BUS &bus, EVENT event, bool value) noexcept {
     die();
 }
 
-inline void DATABUS::rem_event(BUS &bus, EVENT event) noexcept {
-    size_t index = static_cast<size_t>(event);
+inline void DATABUS::rem_flag(
+    BUS &bus, BUS::FLAG flag, const char *file, int line
+) noexcept {
+    size_t index = static_cast<size_t>(flag);
 
-    if (index >= std::extent<decltype(bus.event_lookup)>::value) {
+    if (index >= std::extent<decltype(bus.flag_lookup)>::value) {
         return die();
     }
 
-    ssize_t pos = bus.event_lookup[index];
+    ssize_t pos = bus.flag_lookup[index];
 
     if (pos < 0) {
         return;
     }
 
     size_t erased = erase(
-        INDEX::TYPE::EVENT_TO_BUS,
-        make_key(event), make_pipe_entry(&bus), pos, 1
+        INDEX::TYPE::FLAG_TO_BUS,
+        make_key(flag), make_pipe_entry(&bus), pos, 1
     );
 
     if (!erased) {
@@ -1593,30 +2172,36 @@ inline void DATABUS::rem_event(BUS &bus, EVENT event) noexcept {
     }
 
     INDEX::ENTRY entry{
-        find(INDEX::TYPE::EVENT_TO_BUS, make_key(event), {}, pos, 1)
+        find(INDEX::TYPE::FLAG_TO_BUS, make_key(flag), {}, pos, 1)
     };
 
     if (entry.valid && entry.index == static_cast<size_t>(pos)) {
         BUS *other_bus = to_bus(get_value(entry));
-        other_bus->event_lookup[index] = pos;
+        other_bus->flag_lookup[index] = pos;
     }
 
-    bus.event_lookup[index] = -1;
+    bus.flag_lookup[index] = -1;
+
+    //log("rem #%lu: %s (%s:%d)", bus.id, to_string(flag), file, line);
 }
 
-inline bool DATABUS::has_event(const BUS &bus, EVENT event) const noexcept {
-    size_t index = static_cast<size_t>(event);
+inline bool DATABUS::has_flag(const BUS &bus, BUS::FLAG flag) const noexcept {
+    size_t index = static_cast<size_t>(flag);
 
-    if (index >= std::extent<decltype(bus.event_lookup)>::value) {
+    if (index >= std::extent<decltype(bus.flag_lookup)>::value) {
         return false;
     }
 
-    return bus.event_lookup[index] >= 0;
+    return bus.flag_lookup[index] >= 0;
 }
 
 inline DATABUS::ERROR DATABUS::transmit(
     std::initializer_list<uint64_t> headers, const void *data, size_t size
 ) noexcept {
+    if (!machine.peers) {
+        return NO_ERROR;
+    }
+
     if (!data) {
         size = 0;
     }
@@ -1664,13 +2249,19 @@ inline DATABUS::ERROR DATABUS::transmit(
     if (error != NO_ERROR) {
         outgoing.size = undo_size;
     }
+    else if (outgoing.size > undo_size) {
+        bitset.waiting = false;
+    }
 
     return error;
 }
 
 inline DATABUS::ERROR DATABUS::transmit(const BUS &bus) noexcept {
     return transmit(
-        { static_cast<uint64_t>(PACKET::TYPE::ENTRY), bus.id },
+        {
+            static_cast<uint64_t>(PACKET::TYPE::ENTRY),
+            bus.db, bus.id, bus.pouch.parent, to_uint64(bus.bitset)
+        },
         reinterpret_cast<const uint8_t *>(to_char(bus.payload)),
         bus.payload.size
     );
@@ -1717,8 +2308,8 @@ inline DATABUS::ERROR DATABUS::receive() noexcept {
 
                 break;
             }
-            case PACKET::TYPE::PULSE: {
-                error = receive_pulse(message + parsed, payload_len);
+            case PACKET::TYPE::ETB: {
+                error = receive_etb(message + parsed, payload_len);
 
                 break;
             }
@@ -1734,6 +2325,11 @@ inline DATABUS::ERROR DATABUS::receive() noexcept {
         }
 
         received += lenlen + msglen;
+
+        if (static_cast<PACKET::TYPE>(msgtype) == PACKET::TYPE::ETB
+        && machine.etb == machine.peers) {
+            break;
+        }
     }
 
     if (received) {
@@ -1750,14 +2346,14 @@ inline DATABUS::ERROR DATABUS::receive() noexcept {
     return error;
 }
 
-inline DATABUS::ERROR DATABUS::receive_pulse(
+inline DATABUS::ERROR DATABUS::receive_etb(
     const uint8_t *data, size_t len
 ) noexcept {
     uint64_t value = 0;
     size_t decoded = decode(data, len, &value);
 
     if (decoded) {
-        ++machine.pulse;
+        ++machine.etb;
     }
     else return report_bug();
 
@@ -1773,39 +2369,178 @@ inline DATABUS::ERROR DATABUS::receive_entry(
     if (!decoded) {
         return report_bug();
     }
+    else {
+        data += decoded;
+        len -= decoded;
+    }
+
+    if (value > std::numeric_limits<decltype(BUS::db)>::max()) {
+        return report_bug();
+    }
+
+    const auto owner = static_cast<decltype(BUS::db)>(value);
+
+    decoded = decode(data, len, &value);
+
+    if (!decoded) {
+        return report_bug();
+    }
+    else {
+        data += decoded;
+        len -= decoded;
+    }
+
+    if (!value) {
+        return report_bug();
+    }
+
+    const size_t bus_id = value;
+
+    decoded = decode(data, len, &value);
+
+    if (!decoded) {
+        return report_bug();
+    }
+    else {
+        data += decoded;
+        len -= decoded;
+    }
+
+    const size_t new_container_id = value;
+
+    decoded = decode(data, len, &value);
+
+    if (!decoded) {
+        return report_bug();
+    }
+    else {
+        data += decoded;
+        len -= decoded;
+    }
+
+    const BUS::BITSET bitset{ to_bus_bitset(value) };
+    BUS *new_container = nullptr;
+
+    if (!bitset.serialized) {
+        log("received entry #%lu has not been serialized", bus_id);
+        die();
+    }
+
+    if (new_container_id) {
+        new_container = find_bus(make_query_by_id(new_container_id));
+
+        if (!new_container) {
+            log("container #%lu not found for #%lu", new_container_id, bus_id);
+            die();
+        }
+    }
 
     ERROR error = NO_ERROR;
-    BUS *bus = find_bus(make_query_by_id(value));
+    BUS *bus = find_bus(make_query_by_id(bus_id));
 
     if (bus) {
+        if (has_flag(*bus, BUS::FLAG::RECYCLE)) {
+            // We had the ownership of this bus but some other peer is sending
+            // us an update. This is illegal and implies that there is a fatal
+            // software bug in this library or that some peer has created a new
+            // database entry with an already existing primary key.
+
+            log("possible key collision detected: #%lu", bus_id);
+            die();
+        }
+
         if (bus->payload.size == len
+        &&  bus->pouch.parent == new_container_id
+        &&  bus->db           == owner
+        &&  to_uint64(bitset) == to_uint64(bus->bitset)
         && !std::memcmp(to_char(bus->payload), data, len)) {
+            // This is supposed to be a rare but valid scenario. For example, if
+            // this entry has been modified by its parent but then it is changed
+            // back to the original value by its grandparent all within the same
+            // databus instance, then other databus instances may receive such
+            // an update that doesn't really change anything.
+
             return NO_ERROR;
         }
 
-        error = update_entry(value, data + decoded, len - decoded);
+        BUS *old_container{
+            bus->pouch.parent ? (
+                &get_bus(make_query_by_id(bus->pouch.parent))
+            ) : nullptr
+        };
+
+        error = transfer(*bus, new_container);
+
+        if (!error) {
+            error = update_entry(bus_id, data, len);
+
+            if (error != NO_ERROR) {
+                // Let's transfer it back to its original container.
+
+                error = transfer(*bus, old_container);
+
+                if (error != NO_ERROR) {
+                    // Transferring the bus immediately back into its original
+                    // container should never fail because the memory needed for
+                    // it is already supposed to be allocated.
+
+                    die();
+                }
+            }
+        }
     }
     else {
-        error = create_entry(value, data + decoded, len - decoded);
+        error = create_entry(bus_id, data, len);
+
+        if (!error) {
+            error = transfer(get_bus(make_query_by_id(bus_id)), new_container);
+
+            if (error != NO_ERROR) {
+                if (delete_entry(bus_id) != NO_ERROR) {
+                    die();
+                }
+            }
+        }
     }
 
-    if (!error) {
-        if (!bus) {
-            bus = find_bus(make_query_by_id(value));
-        }
-
-        if (bus) {
-            set_event(*bus, EVENT::DESERIALIZE);
-        }
-        else die();
+    if (error != NO_ERROR) {
+        return error;
     }
+
+    if (!bus && (bus = find_bus(make_query_by_id(bus_id))) == nullptr) {
+        die();
+    }
+
+    if (!bus->bitset.serialized && bitset.serialized) {
+        BUS *container = find_container(*bus);
+        BUS::POUCH *pouch = container ? &container->pouch : nullptr;
+
+        if (pouch && ++pouch->serialized == pouch->contents.size) {
+            if (has_flag(*container, BUS::FLAG::RELOADING)) {
+                rem_flag(*container, BUS::FLAG::RELOADING);
+                set_flag(*container, BUS::FLAG::LOADING);
+            }
+        }
+    }
+
+    bus->bitset = bitset;
+
+    set_flag(*bus, BUS::FLAG::FOREIGN);
+    set_flag(*bus, BUS::FLAG::RECYCLE);
+
+#ifdef DATABUS_DEBUG
+    if (has_flag(*bus, BUS::FLAG::LOADING)) die();
+    if (has_flag(*bus, BUS::FLAG::CHANGED)) die();
+#endif
+
+    bus->db = owner;
 
     return error;
 }
 
-inline DATABUS::ERROR DATABUS::transmit_pulse() noexcept {
+inline DATABUS::ERROR DATABUS::transmit_etb() noexcept {
     return transmit(
-        { static_cast<uint64_t>(PACKET::TYPE::PULSE), machine.index }
+        { static_cast<uint64_t>(PACKET::TYPE::ETB), machine.index }
     );
 }
 
@@ -2779,7 +3514,7 @@ constexpr DATABUS::KEY DATABUS::make_key(uintptr_t val) noexcept {
     };
 }
 
-constexpr DATABUS::KEY DATABUS::make_key(EVENT val) noexcept {
+constexpr DATABUS::KEY DATABUS::make_key(BUS::FLAG val) noexcept {
     return make_key(static_cast<uintptr_t>(val));
 }
 
@@ -2801,16 +3536,27 @@ constexpr DATABUS::RESULT DATABUS::make_result(
 constexpr DATABUS::BUS DATABUS::make_bus(size_t id, PIPE payload) noexcept {
     BUS bus{
         .id{id},
-        .event_lookup{},
+        .flag_lookup{},
         .payload{payload},
+        .pouch{make_bus_pouch()},
         .db{},
+        .bitset{}
     };
 
-    for (auto &lookup_value : bus.event_lookup) {
+    for (auto &lookup_value : bus.flag_lookup) {
         lookup_value = -1;
     }
 
     return bus;
+}
+
+constexpr DATABUS::BUS::POUCH DATABUS::make_bus_pouch() noexcept {
+    return BUS::POUCH{
+        .parent{},
+        .index{},
+        .serialized{},
+        .contents{ make_pipe(PIPE::TYPE::BUS_PTR) }
+    };
 }
 
 constexpr DATABUS::MEMPOOL DATABUS::make_mempool() noexcept {
@@ -2826,10 +3572,11 @@ constexpr DATABUS::MEMPOOL DATABUS::make_mempool() noexcept {
 
 constexpr DATABUS::MACHINE DATABUS::make_machine() noexcept {
     return DATABUS::MACHINE{
-        .index = {},
-        .nodes = {},
+        .nodes = {1},
+        .peers = {0},
         .buses = {},
-        .pulse = 1,
+        .etb   = {},
+        .index = {},
         .state = {}
     };
 }
@@ -2945,12 +3692,12 @@ constexpr struct DATABUS::PIPE::ENTRY DATABUS::make_pipe_entry(
     };
 }
 
-constexpr struct DATABUS::QUERY DATABUS::make_query_by_event(
-    EVENT event
+constexpr struct DATABUS::QUERY DATABUS::make_query_by_flag(
+    BUS::FLAG flag
 ) noexcept {
     return QUERY{
-        .bus_event = event,
-        .type = QUERY::TYPE::BUS_BY_EVENT
+        .bus_flag = flag,
+        .type = QUERY::TYPE::BUS_BY_FLAG
     };
 }
 
@@ -2988,6 +3735,22 @@ constexpr const char *DATABUS::to_string(EVENT event) noexcept {
     }
 
     return "undefined event";
+}
+
+constexpr const char *DATABUS::to_string(BUS::FLAG flag) noexcept {
+    switch (flag) {
+        case BUS::FLAG::NONE:         return "no flag";
+        case BUS::FLAG::CHANGED:      return "changed";
+        case BUS::FLAG::FOREIGN:      return "foreign";
+        case BUS::FLAG::RELOADING:    return "reloading";
+        case BUS::FLAG::LOADING:      return "loading";
+        case BUS::FLAG::TRANSMIT:     return "transmit";
+        case BUS::FLAG::RETRANSMIT:   return "retransmit";
+        case BUS::FLAG::RECYCLE:      return "recycle";
+        case BUS::FLAG::MAX_FLAGS:    return "illegal flag";
+    }
+
+    return "undefined flag";
 }
 
 constexpr size_t DATABUS::size(PIPE::TYPE type) noexcept {
@@ -3123,6 +3886,22 @@ inline size_t DATABUS::decode(
     return 0;
 }
 
+inline uint64_t DATABUS::to_uint64(DATABUS::BUS::BITSET bitset) noexcept {
+    uint64_t value = 0;
+
+    if (bitset.serialized) value |= 1;
+
+    return value;
+}
+
+inline DATABUS::BUS::BITSET DATABUS::to_bus_bitset(uint64_t value) noexcept {
+    BUS::BITSET bitset{};
+
+    if (value & 1) bitset.serialized = true;
+
+    return bitset;
+}
+
 inline int DATABUS::clz(unsigned int x) noexcept {
     return __builtin_clz(x);
 }
@@ -3145,6 +3924,24 @@ inline unsigned long DATABUS::next_pow2(unsigned long x) noexcept {
 
 inline unsigned long long DATABUS::next_pow2(unsigned long long x) noexcept {
     return x <= 1 ? 1 : 1 << ((sizeof(x) * BITS_PER_BYTE) - clz(x - 1));
+}
+
+inline uint16_t DATABUS::crc16(uint16_t crc, const void *mem, size_t len) noexcept {
+    const unsigned char *data = static_cast<const unsigned char *>(mem);
+
+    if (!data) {
+        return 0;
+    }
+
+    for (size_t i=0; i<len; i++) {
+        crc ^= data[i];
+
+        for (unsigned k=0; k<8; k++) {
+            crc = crc & 1 ? (crc >> 1) ^ 0xa001 : crc >> 1;
+        }
+    }
+
+    return crc;
 }
 
 static_assert(
