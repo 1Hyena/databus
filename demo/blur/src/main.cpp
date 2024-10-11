@@ -72,9 +72,8 @@ int main(int argc, char *argv[]) {
         int result = job.get();
 
         if (result != EXIT_SUCCESS) {
-            log("%s", "exiting the program with error");
-
-            return result;
+            log("DB %lu: ended with an error", &job - &jobs.front());
+            abort();
         }
     }
 
@@ -125,7 +124,7 @@ int work(size_t index, size_t count) {
 
     db.set_logger(mt_log, reinterpret_cast<void *>(index));
     db.set_memcap(4 * 1024 * 1024);
-    db.set_matrix(index, count);
+    db.set_matrix(index + 1, count);
 
     if (!db.init()) {
         mt_log("%s", "failed to initialize");
@@ -267,7 +266,7 @@ DATABUS::EVENT handle(
     DATABUS &db, DATABUS::ALERT &alert, std::vector<unsigned char> &foreground,
     std::vector<unsigned char> &background
 ) {
-    const size_t index = db.get_index();
+    const size_t index = db.get_id() - 1;
     const size_t y = alert.entry ? ((alert.entry - 1) / global.image_width) : 0;
     const size_t x = alert.entry ? ((alert.entry - 1) % global.image_width) : 0;
 

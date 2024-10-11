@@ -20,7 +20,7 @@ int main(int argc, char **argv) {
 
         db.set_logger(log, reinterpret_cast<void *>(index));
         db.set_memcap(65536);
-        db.set_matrix(index, databus.size());
+        db.set_matrix(index + 1, databus.size());
 
         if (!db.init()) {
             log("%s", "failed to initialize");
@@ -98,6 +98,17 @@ int main(int argc, char **argv) {
 void handle(DATABUS &db, DATABUS::ALERT &alert, std::span<DATABUS> peers) {
     const size_t index = &db - &peers.front();
 
+    if (alert.entry) {
+        log(
+            "DB %lu: %s of #%lu/%lu: %s", index, db.to_string(alert.event),
+            db.get_container(alert.entry), alert.entry,
+            db.get_entry(alert.entry).c_str
+        );
+    }
+    else {
+        log("DB %lu: %s", index, db.to_string(alert.event));
+    }
+
     switch (alert.event) {
         case DATABUS::SERIALIZE: {
             const char *str = db.get_entry(alert.entry).c_str;
@@ -105,6 +116,23 @@ void handle(DATABUS &db, DATABUS::ALERT &alert, std::span<DATABUS> peers) {
 
             if (db.next_random() % 2) {
                 ++val;
+
+                for (size_t i=0;;++i) {
+                    size_t content_id = db.get_content(alert.entry, i);
+
+                    if (!content_id) {
+                        break;
+                    }
+
+                    if (db.next_random() % 2) {
+                        log(
+                            "DB %lu: #%lu resets #%lu",
+                            index, alert.entry, content_id
+                        );
+
+                        db.set_entry(content_id, "0");
+                    }
+                }
             }
 
             db.set_entry(alert.entry, std::to_string(val).c_str());
@@ -147,10 +175,4 @@ void handle(DATABUS &db, DATABUS::ALERT &alert, std::span<DATABUS> peers) {
         }
         default: break;
     }
-
-    log(
-        "DB %lu: %s of #%lu/%lu: %s", index, db.to_string(alert.event),
-        db.get_container(alert.entry), alert.entry,
-        db.get_entry(alert.entry).c_str
-    );
 }

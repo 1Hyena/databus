@@ -32,10 +32,10 @@ int work(size_t index, size_t count) {
 
     db.set_logger(mt_log, reinterpret_cast<void *>(index));
     db.set_memcap(65536);
-    db.set_matrix(index, count);
+    db.set_matrix(index + 1, count);
 
     if (!db.init()) {
-        mt_log("%s", "failed to initialize");
+        mt_log("DB %lu failed to initialize", index);
 
         return EXIT_FAILURE;
     }
@@ -54,11 +54,15 @@ int work(size_t index, size_t count) {
                 mt_log(
                     "failed to set entry %lu (%s)", i+1, db.to_string(error)
                 );
+
+                abort();
             }
         }
 
         for (size_t i=0; i<graph.size(); ++i) {
-            db.set_container(i+1,graph[i]);
+            if (db.set_container(i+1, graph[i]) != DATABUS::NO_ERROR) {
+                abort();
+            }
         }
     }
 
@@ -117,9 +121,7 @@ int main(int argc, char **argv) {
         int result = job.get();
 
         if (result != EXIT_SUCCESS) {
-            log("%s", "exiting the program with error");
-
-            return result;
+            log("DB %lu: ended with an error", &job - &jobs.front());
         }
     }
 
@@ -129,13 +131,18 @@ int main(int argc, char **argv) {
 }
 
 void handle(DATABUS &db, DATABUS::ALERT &alert, size_t &cycle) {
-    const size_t index = db.get_index();
+    const size_t index = db.get_id() - 1;
 
-    mt_log(
-        "DB %lu: %s of #%lu/%lu: %s", index, db.to_string(alert.event),
-        db.get_container(alert.entry), alert.entry,
-        db.get_entry(alert.entry).c_str
-    );
+    if (alert.entry) {
+        mt_log(
+            "DB %lu: %s of #%lu (slave of #%lu): %s",
+            index, db.to_string(alert.event), alert.entry,
+            db.get_container(alert.entry), db.get_entry(alert.entry).c_str
+        );
+    }
+    else {
+        mt_log("DB %lu: %s", index, db.to_string(alert.event));
+    }
 
     switch (alert.event) {
         case DATABUS::SERIALIZE: {
@@ -143,10 +150,40 @@ void handle(DATABUS &db, DATABUS::ALERT &alert, size_t &cycle) {
             std::intmax_t val = std::strtoimax(str, nullptr, 10);
 
             if (db.next_random() % 2) {
-                ++val;
+                mt_log(
+                    "DB %lu: #%lu value becomes %lu", index, alert.entry, ++val
+                );
+
+                size_t container_id = alert.entry;
+
+                for (size_t i=0;;++i) {
+                    size_t content_id = db.get_content(container_id, i);
+
+                    if (!content_id) {
+                        break;
+                    }
+
+                    if (db.next_random() % 2) {
+                        mt_log(
+                            "DB %lu: #%lu resets #%lu",
+                            index, alert.entry, content_id
+                        );
+
+                        if (!db.set_entry(content_id, "0")) {
+                            if (db.next_random() % 2) {
+                                container_id = content_id;
+                                i = 0;
+                            }
+                        }
+                        else abort();
+                    }
+                }
             }
 
-            db.set_entry(alert.entry, std::to_string(val).c_str());
+            if (!db.set_entry(alert.entry, std::to_string(val).c_str())) {
+                break;
+            }
+            else abort();
 
             break;
         }
