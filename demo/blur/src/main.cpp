@@ -29,8 +29,8 @@ struct global_type {
     std::vector<unsigned char> *image;
 } global;
 
-std::array<std::vector<uint8_t>, 2> ether;
-std::mutex ether_mutex;
+std::array<std::vector<uint8_t>, 4> ether;
+std::array<std::mutex, ether.size()> ether_mutex;
 std::mutex log_mutex;
 
 int main(int argc, char *argv[]) {
@@ -118,13 +118,14 @@ void mt_log(DATABUS::ERROR error, const char *line, void *udata) noexcept {
 }
 
 int work(size_t index, size_t count) {
+    const size_t id = index + 1;
     std::vector<unsigned char> foreground(*global.image);
     std::vector<unsigned char> background(*global.image);
     DATABUS db;
 
-    db.set_logger(mt_log, reinterpret_cast<void *>(index));
+    db.set_logger(mt_log, reinterpret_cast<void *>(id));
     db.set_memcap(4 * 1024 * 1024);
-    db.set_matrix(index + 1, count);
+    db.set_matrix(id, count);
 
     if (!db.init()) {
         mt_log("%s", "failed to initialize");
@@ -174,7 +175,7 @@ int work(size_t index, size_t count) {
         error = db.next_error();
 
         if (error != DATABUS::NO_ERROR) {
-            mt_log("%s (DB %lu)", db.to_string(error), index);
+            mt_log("%s (DB %lu)", db.to_string(error), id);
             break;
         }
 
@@ -209,7 +210,7 @@ int work(size_t index, size_t count) {
 
         for (;;) {
             std::this_thread::yield();
-            std::lock_guard<std::mutex> guard(ether_mutex);
+            std::lock_guard<std::mutex> guard(ether_mutex[index]);
 
             if (ether[index].empty()) {
                 continue;
@@ -223,7 +224,7 @@ int work(size_t index, size_t count) {
 
     db.deinit();
 
-    return EXIT_SUCCESS;
+    return !error ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
 std::array<unsigned char, 4> get_pixel(DATABUS &db, size_t x, size_t y) {
@@ -266,7 +267,8 @@ DATABUS::EVENT handle(
     DATABUS &db, DATABUS::ALERT &alert, std::vector<unsigned char> &foreground,
     std::vector<unsigned char> &background
 ) {
-    const size_t index = db.get_id() - 1;
+    const size_t id = db.get_id();
+    const size_t index = id - 1;
     const size_t y = alert.entry ? ((alert.entry - 1) / global.image_width) : 0;
     const size_t x = alert.entry ? ((alert.entry - 1) % global.image_width) : 0;
 
@@ -348,13 +350,13 @@ DATABUS::EVENT handle(
             const void *outgoing = nullptr;
             size_t length = db.peek(&outgoing);
 
-            std::lock_guard<std::mutex> guard(ether_mutex);
-
             if (length) {
                 for (size_t i=0; i<ether.size(); ++i) {
                     if (i == index) {
                         continue;
                     }
+
+                    std::lock_guard<std::mutex> guard(ether_mutex[i]);
 
                     ether[i].insert(
                         ether[i].end(), static_cast<const uint8_t*>(outgoing),
@@ -364,6 +366,8 @@ DATABUS::EVENT handle(
 
                 db.read(nullptr, length);
             }
+
+            std::lock_guard<std::mutex> guard(ether_mutex[index]);
 
             if (!ether[index].empty()) {
                 size_t capacity = db.reserve(ether[index].size());
@@ -377,7 +381,7 @@ DATABUS::EVENT handle(
                     if (error != DATABUS::NO_ERROR) {
                         mt_log(
                             "DB %lu: %s (%s:%d)",
-                            index, db.to_string(error), __FILE__, __LINE__
+                            id, db.to_string(error), __FILE__, __LINE__
                         );
                     }
                     else {

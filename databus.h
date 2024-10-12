@@ -125,6 +125,7 @@ class DATABUS final {
         const char *file =LEAF(__builtin_FILE()), int line =__builtin_LINE()
     ) noexcept;
     void set_random(uint64_t) noexcept;
+    uint64_t get_random() const noexcept;
     size_t get_memcap() const noexcept;
     size_t get_memtop() const noexcept;
     size_t get_id() const noexcept;
@@ -268,6 +269,7 @@ class DATABUS final {
         size_t   nodes;
         size_t   peers;
         size_t   buses;
+        size_t   cycle;
         size_t   etb;
         uint16_t id;
         STATE    state;
@@ -586,6 +588,8 @@ class DATABUS final {
         bool waiting:1;
         bool synched:1;
         bool reindex:1;
+        bool etbsent:1;
+        bool alldone:1;
     } bitset;
 
     uint64_t random;
@@ -835,6 +839,10 @@ inline void DATABUS::set_random(uint64_t seed) noexcept {
     random = seed;
 }
 
+inline uint64_t DATABUS::get_random() const noexcept {
+    return random;
+}
+
 inline size_t DATABUS::get_memcap() const noexcept {
     return mempool.cap;
 }
@@ -930,6 +938,7 @@ inline DATABUS::ERROR DATABUS::next_error() noexcept {
                     // not transmit it. This optimization reduces bandwidth use.
 
                     if (!master || master->bitset.serialized) {
+                        bus->next.machine.id = bus->machine.id;
                         continue;
                     }
 
@@ -938,6 +947,7 @@ inline DATABUS::ERROR DATABUS::next_error() noexcept {
 
                         if (!grandmaster
                         || grandmaster->machine.id == machine.id) {
+                            bus->next.machine.id = bus->machine.id;
                             continue;
                         }
                     }
@@ -1025,6 +1035,8 @@ inline DATABUS::ERROR DATABUS::next_error() noexcept {
 
                 if (!error) {
                     bus->bitset.changed = false;
+
+                    if (!has_flag(*bus, BUS::FLAG::RECYCLE)) die();
                 }
                 else {
                     bus->next.machine.id = prev_next_id;
@@ -1048,14 +1060,15 @@ inline DATABUS::ERROR DATABUS::next_error() noexcept {
                 goto Again;
             }
 
-            ERROR error = NO_ERROR;
-
             if (!find_bus(make_query_by_flag(BUS::FLAG::UPDATING))) {
-                error = transmit_etb();
-            }
+                ERROR error = transmit_etb();
 
-            if (error != NO_ERROR) {
-                return err(error);
+                if (!error) {
+                    bitset.etbsent = true;
+                }
+                else {
+                    return err(error);
+                }
             }
 
             machine.state = MACHINE::STATE::SYNCHRONIZING;
@@ -1138,16 +1151,32 @@ inline DATABUS::ERROR DATABUS::next_error() noexcept {
             [[fallthrough]];
         }
         case MACHINE::STATE::FINALIZING: {
+            if (bitset.alldone) {
+                break;
+            }
+
+            if (bitset.etbsent) {
+                bitset.etbsent = false;
+            }
+            else {
+                die();
+            }
+
             BUS *bus;
 
             while ( (bus = find_bus(make_query_by_flag(BUS::FLAG::RECYCLE))) ) {
                 rem_flag(*bus, BUS::FLAG::RECYCLE);
+
+                if (bus->next.machine.id == 0) {
+                    die();
+                }
 
                 if (bus->next.machine.id == machine.id) {
                     set_flag(*bus, BUS::FLAG::UPDATE);
                 }
 
                 bus->machine.id = bus->next.machine.id;
+                bus->next.machine.id = 0;
 
                 BUS *master = find_master(*bus);
 
@@ -1162,7 +1191,7 @@ inline DATABUS::ERROR DATABUS::next_error() noexcept {
                 bus->bitset.serialized = false;
             }
 
-            machine.etb = 0;
+            bitset.alldone = true;
 
             break;
         }
@@ -1294,7 +1323,7 @@ inline DATABUS::ALERT DATABUS::next_alert() noexcept {
             break;
         }
         case MACHINE::STATE::FINALIZING: {
-            if (machine.etb == 0 && !bitset.waiting) {
+            if (bitset.alldone && !bitset.waiting) {
                 bitset.waiting = true;
 
                 return make_alert(0, EVENT::FINALIZE);
@@ -1311,7 +1340,7 @@ inline DATABUS::ALERT DATABUS::next_alert() noexcept {
 }
 
 inline bool DATABUS::idle() const noexcept {
-    return bitset.waiting;;
+    return bitset.waiting;
 }
 
 inline void DATABUS::kick_start() noexcept {
@@ -1319,6 +1348,9 @@ inline void DATABUS::kick_start() noexcept {
         if (machine.state == MACHINE::STATE::FINALIZING) {
             machine.state = MACHINE::STATE::SERIALIZING;
             bitset.waiting = false;
+            bitset.alldone = false;
+            machine.etb = 0;
+            ++machine.cycle;
         }
         else if (machine.state == MACHINE::STATE::SYNCHRONIZING) {
             bitset.waiting = false;
@@ -1367,8 +1399,24 @@ inline DATABUS::ERROR DATABUS::write(const void *buf, size_t count) noexcept {
     }
 
     if (count) {
+        for (size_t checked = 0; checked < count;) {
+            uint64_t msglen = 0;
+            size_t lenlen{
+                decode(
+                    static_cast<const uint8_t *>(buf) + checked,
+                    count - checked, &msglen
+                )
+            };
+
+            if (!lenlen || checked + msglen + lenlen > count) {
+                return fuse() ? report_bad_request() : ERROR::BAD_REQUEST;
+            }
+
+            checked += lenlen + msglen;
+        }
+
         ERROR error{
-            append(incoming, reinterpret_cast<const uint8_t *>(buf), count)
+            append(incoming, static_cast<const uint8_t *>(buf), count)
         };
 
         if (error != NO_ERROR && error != OUT_OF_MEMORY) {
@@ -2390,6 +2438,15 @@ inline DATABUS::ERROR DATABUS::transmit(
         }
     );
 
+    std::array<uint8_t, 10> cyclebuf;
+    size_t cyclelen = encode(machine.cycle, cyclebuf);
+
+    if (!cyclelen) {
+        die();
+    }
+
+    packet_size += cyclelen;
+
     const size_t undo_size = outgoing.size;
     ERROR error = reserve(outgoing, encode(packet_size) + packet_size);
 
@@ -2400,6 +2457,10 @@ inline DATABUS::ERROR DATABUS::transmit(
 
         if (len) {
             error = append(outgoing, buf.data(), len);
+
+            if (!error) {
+                error = append(outgoing, cyclebuf.data(), cyclelen);
+            }
 
             for (auto &h : headers) {
                 len = encode(h, buf);
@@ -2447,79 +2508,123 @@ inline DATABUS::ERROR DATABUS::transmit(const BUS &bus) noexcept {
 }
 
 inline DATABUS::ERROR DATABUS::receive() noexcept {
-    ERROR error = NO_ERROR;
     const uint8_t *message = to_uint8(incoming);
-    size_t received = 0;
+    ERROR error = NO_ERROR;
+    size_t received = 0; // TODO: rename
+    size_t queuelen = 0;
 
-    for (;;) {
-        uint64_t msglen = 0;
-        size_t lenlen = decode(
-            message + received, incoming.size - received, &msglen
-        );
+    for (bool done=false; !done && !error;) {
+        size_t accepted = 0;
 
-        if (!lenlen) {
-            break;
-        }
+        for (;;) {
+            uint64_t msglen = 0;
+            size_t lenlen = decode(
+                message + received, incoming.size - received, &msglen
+            );
 
-        if (lenlen + msglen > incoming.size) {
-            break;
-        }
+            if (!lenlen) {
+                break;
+            }
 
-        uint64_t msgtype = 0;
-        size_t parsed = received + lenlen;
-        size_t decoded = decode(
-            message + parsed, incoming.size - parsed, &msgtype
-        );
+            if (lenlen + msglen > incoming.size) {
+                break;
+            }
 
-        if (!decoded) {
-            error = fuse() ? report_bug() : LIBRARY_ERROR;
+            const size_t packet_len = lenlen + msglen;
 
-            break;
-        }
+            uint64_t msgcycle = 0;
+            size_t parsed = received + lenlen;
+            size_t cyclelen = decode(
+                message + parsed, incoming.size - parsed, &msgcycle
+            );
 
-        parsed += decoded;
-
-        size_t payload_len = std::min(msglen - decoded, incoming.size - parsed);
-
-        switch (static_cast<PACKET::TYPE>(msgtype)) {
-            case PACKET::TYPE::ENTRY: {
-                error = receive_entry(message + parsed, payload_len);
+            if (!cyclelen) {
+                error = fuse() ? report_bug() : LIBRARY_ERROR;
 
                 break;
             }
-            case PACKET::TYPE::ETB: {
-                error = receive_etb(message + parsed, payload_len);
+
+            parsed += cyclelen;
+
+            if (msgcycle < machine.cycle) {
+                die();
+            }
+            else if (msgcycle > machine.cycle) {
+                if (accepted) {
+                    break;
+                }
+
+                received += packet_len;
+                queuelen = received;
+
+                continue;
+            }
+
+            uint64_t msgtype = 0;
+            size_t typelen = decode(
+                message + parsed, incoming.size - parsed, &msgtype
+            );
+
+            if (!typelen) {
+                error = fuse() ? report_bug() : LIBRARY_ERROR;
 
                 break;
             }
-            default: {
-                error = report_bug();
+
+            parsed += typelen;
+
+            size_t payload_len = msglen - (cyclelen + typelen);
+
+            if (payload_len > incoming.size - parsed) {
+                die();
+            }
+
+            switch (static_cast<PACKET::TYPE>(msgtype)) {
+                case PACKET::TYPE::ENTRY: {
+                    error = receive_entry(message + parsed, payload_len);
+
+                    break;
+                }
+                case PACKET::TYPE::ETB: {
+                    error = receive_etb(message + parsed, payload_len);
+
+                    break;
+                }
+                default: {
+                    error = report_bug();
+
+                    break;
+                }
+            }
+
+            if (error != NO_ERROR) {
+                break;
+            }
+
+            received += packet_len;
+            accepted += packet_len;
+
+            if (static_cast<PACKET::TYPE>(msgtype) == PACKET::TYPE::ETB
+            && machine.etb == machine.peers) {
+                done = true;
 
                 break;
             }
         }
 
-        if (error != NO_ERROR) {
+        if (received <= queuelen) {
             break;
         }
 
-        received += lenlen + msglen;
-
-        if (static_cast<PACKET::TYPE>(msgtype) == PACKET::TYPE::ETB
-        && machine.etb == machine.peers) {
-            break;
-        }
-    }
-
-    if (received) {
         if (incoming.size > received) {
             std::memmove(
-                incoming.data,
+                to_uint8(incoming) + queuelen,
                 to_uint8(incoming) + received, incoming.size - received
             );
         }
 
-        incoming.size -= received;
+        incoming.size -= received - queuelen;
+        received = queuelen;
     }
 
     return error;
@@ -2770,6 +2875,10 @@ inline DATABUS::ERROR DATABUS::receive_entry(
 
     bus->machine.id = owner;
     bus->next.machine.id = next_owner;
+
+    if (bus->next.machine.id == 0) {
+        die();
+    }
 
     return error;
 }
@@ -3810,8 +3919,9 @@ constexpr DATABUS::MACHINE DATABUS::make_machine() noexcept {
     return DATABUS::MACHINE{
         .nodes = {1},
         .peers = {0},
-        .buses = {},
-        .etb   = {},
+        .buses = {0},
+        .cycle = {1},
+        .etb   = {0},
         .id    = {1},
         .state = {}
     };
